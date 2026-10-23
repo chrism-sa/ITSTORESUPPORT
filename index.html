@@ -12,9 +12,9 @@
       name="apple-mobile-web-app-status-bar-style"
       content="black-translucent"
     />
-    <meta name="apple-mobile-web-app-title" content="Field Tracker" />
+    <meta name="apple-mobile-web-app-title" content="MIDI IT Check" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <title>Alfamidi Field Tracker</title>
+    <title>MIDI IT Check</title>
 
     <link
       rel="icon"
@@ -33,7 +33,7 @@
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
-    <link rel="stylesheet" href="style.css?v=2.4.0" />
+    <link rel="stylesheet" href="style.css?v=2.4.4" />
     <script src="app.js?v=2.4.0"></script>
     <script src="motion-layer.js"></script>
     <script
@@ -50,7 +50,7 @@
 
     <!-- SPLASH SCREEN -->
     <div
-      x-show="isLoading"
+      x-show="isLoading || showPostUnlockSplash"
       x-transition.opacity
       class="fixed inset-0 z-[100] bg-slate-900 grid place-items-center text-center p-6"
     >
@@ -59,9 +59,10 @@
           <img src="alfamidi-logo.png" alt="Alfamidi" width="180" height="48" />
         </div>
         <div>
-          <h1 class="text-xl font-bold text-white">Alfamidi Field Tracker</h1>
-          <p class="text-xs text-slate-400 mt-1">
-            Memuat aplikasi & sistem keamanan...
+          <h1 class="text-xl font-bold text-white">MIDI IT Check</h1>
+          <p class="splash-status text-xs text-slate-400 mt-1" aria-live="polite">
+            <span x-show="splashMessage" x-text="splashMessage" class="splash-typing"></span>
+            <span x-show="!splashMessage">Memuat aplikasi & sistem keamanan...</span>
           </p>
         </div>
         <div
@@ -139,55 +140,25 @@
       style="padding-top: env(safe-area-inset-top)"
     >
       <div
-        class="site-header-inner max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-2"
+        class="site-header-inner max-w-5xl mx-auto px-4 flex items-center justify-between gap-2"
       >
-        <button
-          class="flex items-center gap-3 text-left min-w-0"
-          @click="go('dashboard')"
-        >
-          <span class="brand-mark shrink-0">
-            <img
-              src="alfamidi-logo.png"
-              alt="Alfamidi"
-              width="140"
-              height="38"
-            />
-          </span>
-          <span class="min-w-0">
-            <span class="flex items-center gap-1.5 flex-wrap">
-              <span class="brand-title font-bold text-sm leading-tight truncate"
-                >Alfamidi Field Tracker</span
-              >
-              <span
-                x-show="!isOnline"
-                x-cloak
-                class="offline-badge px-1.5 py-0.5 text-[10px] font-extrabold rounded"
-                >OFFLINE</span
-              >
-            </span>
-            <span
-              class="brand-subtitle block text-[11px] truncate"
-              x-text="headerSubtitle"
-            ></span>
-          </span>
-        </button>
-
-        <div class="flex items-center gap-1.5 shrink-0">
-          <button
-            x-show="pwaPrompt"
-            x-cloak
-            @click="installPwa()"
-            class="btn btn-primary install-button"
-            style="padding: 8px 12px; font-size: 12px"
-          >
-            <i data-lucide="download" class="w-3.5 h-3.5"></i>
-            <span class="hidden sm:inline">Pasang aplikasi</span>
+        <div class="header-copy">
+          <button class="header-title" @click="go('dashboard')">
+            MIDI IT Check
           </button>
-          <button @click="openSettings()" class="btn btn-soft settings-button">
-            <i data-lucide="settings" class="w-4 h-4"></i>
-            <span class="hidden sm:inline">Pengaturan</span>
-          </button>
+          <span class="header-description">
+            Checklist Perangkat IT Toko
+          </span>
+          <span class="header-subtitle" x-text="headerSubtitle"></span>
         </div>
+        <button
+          class="header-logo-link"
+          type="button"
+          @click="go('dashboard')"
+          aria-label="Kembali ke beranda MIDI IT Check"
+        >
+          <img src="alfamidi-logo.png" alt="Alfamidi" width="140" height="38" />
+          </button>
       </div>
     </header>
 
@@ -440,7 +411,7 @@
           <template x-if="modal.type === 'sheet'">
             <div class="space-y-4">
               <div>
-                <label class="lbl">Nama jenis pemeriksaan</label
+                <label class="lbl">Nama jenis Checklist</label
                 ><input
                   class="inp"
                   x-model="modal.data.name"
@@ -734,9 +705,9 @@
             <p class="eyebrow">
               <span class="eyebrow-dot"></span> OPERASIONAL LAPANGAN
             </p>
-            <h1>Pemeriksaan toko</h1>
+            <h1>Checklist Perangkat IT Toko</h1>
             <p class="dashboard-intro">
-              Pantau progres perangkat dan lanjutkan pemeriksaan di wilayah
+              Pantau progres perangkat dan lanjutkan Checklist di wilayah
               Anda.
             </p>
           </div>
@@ -942,7 +913,7 @@
                       @click="openStore(toko)"
                     >
                       <span
-                        x-text="isStoreDone(toko.id) ? 'Lihat' : 'Mulai' "
+                        x-text="isStoreDone(toko.id) ? 'Lihat' : 'Input' "
                       ></span
                       ><i data-lucide="arrow-up-right" class="w-4 h-4"></i>
                     </button>
@@ -967,7 +938,7 @@
       <div
         x-show="view === 'units'"
         x-cloak
-        class="max-w-2xl mx-auto space-y-4"
+        class="w-full space-y-4"
       >
         <div class="flex items-center justify-between gap-2">
           <button @click="go('dashboard')" class="btn btn-soft">
@@ -1080,7 +1051,7 @@
       <div
         x-show="view === 'reader'"
         x-cloak
-        class="max-w-2xl mx-auto space-y-4"
+        class="w-full space-y-4"
       >
         <div class="flex items-center justify-between gap-2">
           <button @click="go('units')" class="btn btn-soft">
@@ -1146,7 +1117,7 @@
       </div>
 
       <!-- VIEW: FORM -->
-      <div x-show="view === 'form'" x-cloak class="max-w-2xl mx-auto space-y-4">
+      <div x-show="view === 'form'" x-cloak class="w-full space-y-4">
         <div class="flex items-center justify-between gap-2">
           <button @click="go('units')" class="btn btn-soft">
             <i data-lucide="arrow-left" class="w-4 h-4"></i> Kembali
@@ -1281,7 +1252,7 @@
             class="btn btn-primary w-full py-4 text-sm font-extrabold shadow-lg shadow-red-600/20"
           >
             <i data-lucide="circle-check" class="w-5 h-5"></i> Simpan Hasil
-            Pemeriksaan
+            Checklist
           </button>
         </div>
       </div>
@@ -1290,7 +1261,7 @@
       <div
         x-show="view === 'settings'"
         x-cloak
-        class="max-w-2xl mx-auto space-y-4"
+        class="w-full space-y-4"
       >
         <div class="flex items-center gap-3">
           <button
@@ -1372,10 +1343,10 @@
               ></span>
               <span class="flex-1"
                 ><span class="block font-bold text-sm"
-                  >Jenis pemeriksaan & formulir</span
+                  >Jenis Checklist & formulir</span
                 ><span
                   class="block text-xs text-slate-500"
-                  x-text="sheets.length + ' jenis pemeriksaan'"
+                  x-text="sheets.length + ' jenis Checklist'"
                 ></span
               ></span>
               <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
@@ -1586,7 +1557,7 @@
               class="btn btn-primary w-full py-3 shadow-lg shadow-red-600/20"
               @click="openSheetModal()"
             >
-              <i data-lucide="plus" class="w-4 h-4"></i> Buat jenis pemeriksaan
+              <i data-lucide="plus" class="w-4 h-4"></i> Buat jenis Checklist
             </button>
             <template x-for="sh in sheets" :key="sh.id">
               <div class="card p-4 flex items-center gap-3">
@@ -1650,7 +1621,7 @@
               <button
                 class="btn btn-soft btn-icon"
                 @click="openSheetModal(currentSheet)"
-                aria-label="Ubah jenis pemeriksaan"
+                aria-label="Ubah jenis Checklist"
               >
                 <i data-lucide="pencil" class="w-4 h-4"></i>
               </button>
@@ -1734,7 +1705,7 @@
                 Ekspor Laporan CSV
               </h3>
               <p class="text-xs text-slate-500">
-                Unduh data bulan yang dipilih ke CSV per jenis pemeriksaan atau
+                Unduh data bulan yang dipilih ke CSV per jenis Checklist atau
                 sebagai rekap gabungan.
               </p>
 
@@ -1823,15 +1794,15 @@
             loading="lazy"
           />
           <div class="footer-brand-copy">
-            <strong>Field Tracker</strong>
-            <span>Pendataan perangkat toko</span>
+            <strong>MIDI IT Check</strong>
+            <span>Checklist Perangkat IT Toko</span>
           </div>
         </div>
         <div class="footer-meta">
           <div class="footer-meta-info">
             <span
               class="footer-copyright"
-              x-text="'© ' + new Date().getFullYear() + ' Alfamidi Field Tracker'"
+              x-text="'© ' + new Date().getFullYear() + ' MIDI IT Check'"
             ></span>
             <span class="footer-storage">
               <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i>
@@ -1842,6 +1813,21 @@
             <i data-lucide="arrow-up" class="w-3.5 h-3.5"></i>
             <span>Ke atas</span>
           </a>
+          <div class="footer-actions">
+            <button class="footer-action footer-settings-link" @click="openSettings()">
+              <i data-lucide="settings-2" class="w-4 h-4"></i>
+              <span>Pengaturan</span>
+            </button>
+            <button
+              x-show="pwaPrompt"
+              x-cloak
+              class="footer-action"
+              @click="installPwa()"
+            >
+              <i data-lucide="download" class="w-4 h-4"></i>
+              <span>Pasang aplikasi</span>
+            </button>
+          </div>
         </div>
       </div>
     </footer>
@@ -1866,10 +1852,10 @@
         @click="openExamination()"
         :class="['units', 'form', 'reader'].includes(view) ? 'active' : ''"
         :aria-current="['units', 'form', 'reader'].includes(view) ? 'page' : null"
-        :aria-label="activeToko.id ? 'Buka pemeriksaan toko aktif' : 'Pilih toko untuk memulai pemeriksaan'"
+        :aria-label="activeToko.id ? 'Buka Checklist toko aktif' : 'Pilih toko untuk memulai Checklist'"
       >
         <i data-lucide="clipboard-check" class="w-5 h-5"></i
-        ><span>Pemeriksaan</span>
+        ><span>Checklist</span>
       </button>
       <button
         type="button"

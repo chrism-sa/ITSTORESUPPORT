@@ -495,6 +495,8 @@ function app() {
     return {
         isLoading: true,
         isLocked: true,
+        showPostUnlockSplash: false,
+        splashMessage: '',
         pinInput: '',
         showPinAuth: false,
         correctPinHash: store.get('custom_pin_hash', DEFAULT_PIN_HASH),
@@ -598,7 +600,7 @@ function app() {
                 this.isLocked = false;
                 this.pinInput = '';
                 sessionStore.set('unlocked', 'true');
-                this.toast('Aplikasi berhasil dibuka');
+                await this.playDashboardSplash();
             } else {
                 this.pinSecurity.failures = Number(this.pinSecurity.failures || 0) + 1;
                 if (this.pinSecurity.failures >= 5) {
@@ -611,6 +613,21 @@ function app() {
                     : 'PIN salah. Percobaan ke-' + this.pinSecurity.failures + '.', 'error');
                 this.pinInput = '';
             }
+        },
+
+        async playDashboardSplash() {
+            const message = 'PIN benar. Mengarahkan ke dashboard...';
+            this.splashMessage = '';
+            this.showPostUnlockSplash = true;
+            for (let index = 1; index <= message.length; index++) {
+                this.splashMessage = message.slice(0, index);
+                await new Promise(resolve => setTimeout(resolve, 28));
+            }
+            await new Promise(resolve => setTimeout(resolve, 350));
+            this.go('dashboard');
+            this.showPostUnlockSplash = false;
+            this.splashMessage = '';
+            this.toast('Aplikasi berhasil dibuka');
         },
 
         lockApp() {
