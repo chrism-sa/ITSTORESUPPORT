@@ -1822,16 +1822,26 @@
             height="26"
             loading="lazy"
           />
-          <span>Pendataan perangkat toko</span>
+          <div class="footer-brand-copy">
+            <strong>Field Tracker</strong>
+            <span>Pendataan perangkat toko</span>
+          </div>
         </div>
         <div class="footer-meta">
-          <span
-            x-text="'© ' + new Date().getFullYear() + ' Alfamidi Field Tracker'"
-          ></span>
-          <span class="footer-storage"
-            ><i data-lucide="hard-drive" class="w-3.5 h-3.5"></i> Data tersimpan
-            di perangkat ini</span
-          >
+          <div class="footer-meta-info">
+            <span
+              class="footer-copyright"
+              x-text="'© ' + new Date().getFullYear() + ' Alfamidi Field Tracker'"
+            ></span>
+            <span class="footer-storage">
+              <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i>
+              <span>Data tersimpan lokal di perangkat ini</span>
+            </span>
+          </div>
+          <a class="footer-top-link" href="#main-content">
+            <i data-lucide="arrow-up" class="w-3.5 h-3.5"></i>
+            <span>Ke atas</span>
+          </a>
         </div>
       </div>
     </footer>
@@ -1853,10 +1863,10 @@
       </button>
       <button
         type="button"
-        @click="activeToko.id ? go('units') : go('dashboard')"
-        :disabled="!activeToko.id"
+        @click="openExamination()"
         :class="['units', 'form', 'reader'].includes(view) ? 'active' : ''"
         :aria-current="['units', 'form', 'reader'].includes(view) ? 'page' : null"
+        :aria-label="activeToko.id ? 'Buka pemeriksaan toko aktif' : 'Pilih toko untuk memulai pemeriksaan'"
       >
         <i data-lucide="clipboard-check" class="w-5 h-5"></i
         ><span>Pemeriksaan</span>

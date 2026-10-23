@@ -766,6 +766,18 @@ function app() {
             this.$nextTick(() => this.animateView(view));
         },
         openStore(t) { this.activeToko = t; this.activeUnit = {}; this.ensureSuperAdminUnit(t); this.go('units'); },
+        openExamination() {
+            if (this.activeToko && this.activeToko.id) {
+                this.go('units');
+                return;
+            }
+            this.go('dashboard');
+            this.toast('Pilih toko terlebih dahulu untuk membuka pemeriksaan', 'error');
+            this.$nextTick(() => {
+                const storeList = document.querySelector('.store-browser');
+                if (storeList) storeList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        },
 
         hasSuperAdminSheet(storeObj) {
             if (!storeObj || !storeObj.nama) return false;
