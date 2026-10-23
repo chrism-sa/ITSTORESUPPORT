@@ -22,35 +22,41 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.0.3';
-    const savedVersion = localStorage.getItem('aft2:version');
-    if (savedVersion !== APP_VERSION) {
-        localStorage.setItem('aft2:version', APP_VERSION);
-        if ('caches' in window) {
-            caches.keys().then(names => {
-                for (let name of names) caches.delete(name);
-            });
-        }
-    }
+    const APP_VERSION = '2.4.0';
+    try {
+        if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
+    } catch (e) {}
 })();
-
-/* ===================== SECURITY & INSPECT LOCK ===================== */
-document.addEventListener('contextmenu', e => e.preventDefault());
-document.addEventListener('keydown', e => {
-    if (
-        e.key === 'F12' ||
-        (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key.toUpperCase())) ||
-        (e.ctrlKey && e.key.toUpperCase() === 'U')
-    ) {
-        e.preventDefault();
-    }
-});
 
 /* ===================== UTIL & STORAGE ===================== */
 const NS = 'aft2:';
-const SCHEMA_REV = 4;
+const SCHEMA_REV = 6;
+const isSafeId = value => {
+    const id = String(value || '');
+    return /^[a-z0-9_-]{1,80}$/i.test(id) && !['__proto__', 'constructor', 'prototype'].includes(id);
+};
 const uid = () => Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 7);
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const isValidMonth = (value) => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(value || ''));
+const localMonth = () => {
+    const now = new Date();
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+};
+const formatMonth = (value) => {
+    if (!isValidMonth(value)) return '';
+    const [year, month] = value.split('-').map(Number);
+    return new Date(year, month - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+};
+
+function migrateMonthlyEntries(entries, fallbackMonth) {
+    const migrated = {};
+    Object.entries(entries && typeof entries === 'object' ? entries : {}).forEach(([key, value]) => {
+        const monthPrefix = key.match(/^(\d{4}-(?:0[1-9]|1[0-2]))\|/);
+        if (monthPrefix) migrated[key] = value;
+        else if (key.split('|').length === 2) migrated[fallbackMonth + '|' + key] = value;
+    });
+    return migrated;
+}
 
 const store = {
     get(k, fb = null) {
@@ -76,7 +82,19 @@ const store = {
     }
 };
 
-/* Enkripsi SHA-256 untuk PIN */
+const sessionStore = {
+    get(key) {
+        try { return sessionStorage.getItem(NS + key); } catch (e) { return null; }
+    },
+    set(key, value) {
+        try { sessionStorage.setItem(NS + key, value); return true; } catch (e) { return false; }
+    },
+    del(key) {
+        try { sessionStorage.removeItem(NS + key); } catch (e) {}
+    }
+};
+
+/* Verifikasi hash PIN lama sebelum migrasi ke PBKDF2. */
 async function hashPin(pin) {
     const encoder = new TextEncoder();
     const data = encoder.encode(String(pin));
@@ -85,7 +103,39 @@ async function hashPin(pin) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// PIN Default terenkripsi (Dirahasiakan, hanya pemilik yang tahu)
+const PIN_HASH_ITERATIONS = 310000;
+
+async function createPinHash(pin) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(pin)), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PIN_HASH_ITERATIONS }, key, 256);
+    const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    return 'pbkdf2$' + PIN_HASH_ITERATIONS + '$' + hex(salt) + '$' + hex(new Uint8Array(bits));
+}
+
+async function verifyPin(pin, savedHash) {
+    if (!String(savedHash || '').startsWith('pbkdf2$')) {
+        const valid = await hashPin(pin) === savedHash;
+        return { valid, upgradedHash: valid ? await createPinHash(pin) : null };
+    }
+
+    const [, iterationsText, saltHex, expectedHex] = String(savedHash).split('$');
+    const iterations = Number(iterationsText);
+    if (!Number.isInteger(iterations) || iterations < 100000 || iterations > 1000000 || !/^[0-9a-f]{32}$/i.test(saltHex || '') || !/^[0-9a-f]{64}$/i.test(expectedHex || '')) {
+        return { valid: false, upgradedHash: null };
+    }
+
+    const salt = new Uint8Array(saltHex.match(/.{2}/g).map(byte => parseInt(byte, 16)));
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(pin)), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
+    const actual = new Uint8Array(bits);
+    const expected = expectedHex.match(/.{2}/g).map(byte => parseInt(byte, 16));
+    let difference = 0;
+    actual.forEach((byte, index) => { difference |= byte ^ expected[index]; });
+    return { valid: difference === 0, upgradedHash: null };
+}
+
+// Hash PIN bawaan dipertahankan untuk kompatibilitas dan dimigrasikan setelah login berhasil.
 const DEFAULT_PIN_HASH = 'e7042ac7d09c7bc41c8cfa5749e41858f6980643bc0db1a83cc793d3e24d3f77';
 
 let beepCtx = null;
@@ -349,17 +399,19 @@ function buildDefaultState() {
     ];
     const units = {};
     stores.forEach(s => { units[s.id] = makeDefaultUnits(sheets, s); });
-    return { v: 2, schemaRev: SCHEMA_REV, sheets, regions, stores, units, records: {}, drafts: {} };
+    return { v: 2, schemaRev: SCHEMA_REV, activeMonth: localMonth(), sheets, regions, stores, units, records: {}, drafts: {} };
 }
 
 function sanitizeState(st) {
     const out = { v: 2, schemaRev: st.schemaRev || SCHEMA_REV };
+    const savedMonth = isValidMonth(st.activeMonth) ? st.activeMonth : localMonth();
+    out.activeMonth = localMonth();
     out.sheets = (Array.isArray(st.sheets) ? st.sheets : []).filter(s => s && s.id).map(s => ({
         id: String(s.id),
         name: s.name || 'Sheet',
         unitLabel: s.unitLabel || 'Unit',
-        icon: s.icon || 'package',
-        color: s.color || PALETTE[0],
+        icon: SHEET_ICONS.includes(s.icon) ? s.icon : 'package',
+        color: /^#[0-9a-f]{6}$/i.test(String(s.color || '')) ? s.color : PALETTE[0],
         defaultCount: Math.max(0, Math.min(10, parseInt(s.defaultCount, 10) || 0)),
         fields: (Array.isArray(s.fields) ? s.fields : []).filter(f => f && f.id).map(f => ({
             id: String(f.id),
@@ -373,13 +425,30 @@ function sanitizeState(st) {
     }));
     if (!out.sheets.length) out.sheets = defaultSheets();
 
-    out.regions = defaultRegions().map(dr => {
-        const existing = (st.regions || []).find(r => r.id === dr.id);
-        return existing ? { ...existing, color: REGION_COLORS[dr.id] || existing.color } : dr;
+    const defaultRegionList = defaultRegions();
+    const defaultRegionIds = new Set(defaultRegionList.map(region => region.id));
+    const savedRegions = Array.isArray(st.regions) ? st.regions : [];
+    const normalizeRegion = (region, fallbackColor) => ({
+        id: String(region.id),
+        name: String(region.name || 'WILAYAH').trim().toUpperCase().slice(0, 60),
+        color: /^#[0-9a-f]{6}$/i.test(String(region.color || '')) ? region.color : fallbackColor
     });
+    out.regions = defaultRegionList
+        .filter(defaultRegion => savedRegions.some(region => region && region.id === defaultRegion.id))
+        .map(defaultRegion => {
+            const existing = savedRegions.find(region => region && region.id === defaultRegion.id);
+            return normalizeRegion(existing, defaultRegion.color);
+        });
+    const regionIds = new Set(out.regions.map(region => region.id));
+    savedRegions.forEach((region, index) => {
+        if (!region || !isSafeId(region.id) || defaultRegionIds.has(region.id) || regionIds.has(region.id)) return;
+        out.regions.push(normalizeRegion(region, PALETTE[index % PALETTE.length]));
+        regionIds.add(String(region.id));
+    });
+    if (!out.regions.length) out.regions = defaultRegionList;
 
     const rids = out.regions.map(r => r.id);
-    out.stores = (Array.isArray(st.stores) ? st.stores : []).filter(s => s && s.id).map(s => ({
+    out.stores = (Array.isArray(st.stores) ? st.stores : []).filter(s => s && isSafeId(s.id)).map(s => ({
         id: String(s.id),
         code: String(s.code || '').trim().toUpperCase(),
         nama: String(s.nama || 'TOKO').trim().toUpperCase(),
@@ -397,8 +466,8 @@ function sanitizeState(st) {
             : makeDefaultUnits(out.sheets, s);
     });
 
-    out.records = st.records && typeof st.records === 'object' ? st.records : {};
-    out.drafts = st.drafts && typeof st.drafts === 'object' ? st.drafts : {};
+    out.records = migrateMonthlyEntries(st.records, savedMonth);
+    out.drafts = migrateMonthlyEntries(st.drafts, savedMonth);
     return out;
 }
 
@@ -429,12 +498,14 @@ function app() {
         pinInput: '',
         showPinAuth: false,
         correctPinHash: store.get('custom_pin_hash', DEFAULT_PIN_HASH),
+        pinSecurity: store.get('pin_security', { failures: 0, lockedUntil: 0 }),
 
         changePinForm: { oldPin: '', newPin: '', confirmPin: '' },
         showOldPin: false, showNewPin: false, showConfirmPin: false,
 
         view: 'dashboard',
         sheets: [], regions: [], stores: [], units: {}, records: {}, drafts: {},
+        activeMonth: localMonth(),
         activeToko: {}, activeUnit: {}, formData: {}, draftDirty: false,
 
         search: '', filterRegion: 'all', filterStatus: 'all',
@@ -464,15 +535,16 @@ function app() {
         paletteColors: PALETTE, sheetIcons: SHEET_ICONS, fieldTypes: FIELD_TYPES,
 
         async init() {
-            setTimeout(() => { this.isLoading = false; }, 1200);
             this.loadState();
             
-            const sessionUnlocked = sessionStorage.getItem('aft2:unlocked');
+            const sessionUnlocked = sessionStore.get('unlocked');
             if (sessionUnlocked === 'true') {
                 this.isLocked = false;
             }
 
             this.restoreSession();
+            this.syncCurrentMonth();
+            this.monthCheckTimer = setInterval(() => this.syncCurrentMonth(), 60000);
             this.watchIcons();
 
             try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
@@ -483,12 +555,16 @@ function app() {
 
             document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.onEscape(); });
             window.addEventListener('pagehide', () => this.flush());
-            window.addEventListener('visibilitychange', () => {
+            document.addEventListener('visibilitychange', () => {
                 if (document.hidden) {
+                    this.syncCurrentMonth();
                     this.flush();
                     if (this.scanOpen) this.closeScanner();
-                }
+                } else this.syncCurrentMonth();
             });
+
+            this.isLoading = false;
+            this.$nextTick(() => this.animateView(this.view));
         },
 
         async unlockApp() {
@@ -502,21 +578,44 @@ function app() {
                 this.pinInput = '';
                 return;
             }
-            const enteredHash = await hashPin(cleanPin);
-            if (enteredHash === this.correctPinHash) {
+            if (!this.pinSecurity || typeof this.pinSecurity !== 'object') {
+                this.pinSecurity = { failures: 0, lockedUntil: 0 };
+            }
+            const remaining = Number(this.pinSecurity.lockedUntil || 0) - Date.now();
+            if (remaining > 0) {
+                this.pinInput = '';
+                this.toast('Terlalu banyak percobaan. Coba lagi dalam ' + Math.ceil(remaining / 60000) + ' menit.', 'error');
+                return;
+            }
+            const result = await verifyPin(cleanPin, this.correctPinHash);
+            if (result.valid) {
+                if (result.upgradedHash) {
+                    this.correctPinHash = result.upgradedHash;
+                    store.set('custom_pin_hash', result.upgradedHash);
+                }
+                this.pinSecurity = { failures: 0, lockedUntil: 0 };
+                store.set('pin_security', this.pinSecurity);
                 this.isLocked = false;
                 this.pinInput = '';
-                sessionStorage.setItem('aft2:unlocked', 'true');
+                sessionStore.set('unlocked', 'true');
                 this.toast('Aplikasi berhasil dibuka');
             } else {
-                this.toast('PIN salah! Akses ditolak.', 'error');
+                this.pinSecurity.failures = Number(this.pinSecurity.failures || 0) + 1;
+                if (this.pinSecurity.failures >= 5) {
+                    const delay = Math.min(15 * 60 * 1000, 30 * 1000 * (2 ** Math.min(this.pinSecurity.failures - 5, 5)));
+                    this.pinSecurity.lockedUntil = Date.now() + delay;
+                }
+                store.set('pin_security', this.pinSecurity);
+                this.toast(this.pinSecurity.lockedUntil > Date.now()
+                    ? 'Terlalu banyak percobaan. Coba lagi dalam ' + Math.ceil((this.pinSecurity.lockedUntil - Date.now()) / 60000) + ' menit.'
+                    : 'PIN salah. Percobaan ke-' + this.pinSecurity.failures + '.', 'error');
                 this.pinInput = '';
             }
         },
 
         lockApp() {
             this.isLocked = true;
-            sessionStorage.removeItem('aft2:unlocked');
+            sessionStore.del('unlocked');
             this.toast('Aplikasi terkunci');
         },
 
@@ -526,10 +625,10 @@ function app() {
             if (!/^\d{5}$/.test(newPin)) return this.toast('PIN baru harus tepat 5 digit angka', 'error');
             if (newPin !== confirmPin) return this.toast('Konfirmasi PIN baru tidak cocok', 'error');
 
-            const oldHash = await hashPin(oldPin);
-            if (oldHash !== this.correctPinHash) return this.toast('PIN lama salah!', 'error');
+            const oldPinResult = await verifyPin(oldPin, this.correctPinHash);
+            if (!oldPinResult.valid) return this.toast('PIN lama salah!', 'error');
 
-            const newHash = await hashPin(newPin);
+            const newHash = await createPinHash(newPin);
             this.correctPinHash = newHash;
             store.set('custom_pin_hash', newHash);
 
@@ -555,10 +654,11 @@ function app() {
         applyState(st) {
             this.sheets = st.sheets; this.regions = st.regions; this.stores = st.stores;
             this.units = st.units; this.records = st.records; this.drafts = st.drafts;
+            this.activeMonth = st.activeMonth || localMonth();
         },
 
         snapshot() {
-            return { v: 2, schemaRev: SCHEMA_REV, sheets: this.sheets, regions: this.regions, stores: this.stores, units: this.units, records: this.records, drafts: this.drafts };
+            return { v: 2, schemaRev: SCHEMA_REV, activeMonth: this.activeMonth, sheets: this.sheets, regions: this.regions, stores: this.stores, units: this.units, records: this.records, drafts: this.drafts };
         },
         saveNow() {
             clearTimeout(this.saveTimer);
@@ -585,14 +685,52 @@ function app() {
         },
 
         watchIcons() {
-            let t;
-            const refresh = () => { clearTimeout(t); t = setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 30); };
-            new MutationObserver(refresh).observe(document.body, { childList: true, subtree: true });
-            refresh();
+            let refreshQueued = false;
+            const containsIcon = node => node.nodeType === Node.ELEMENT_NODE &&
+                (node.matches('[data-lucide]') || node.querySelector('[data-lucide]'));
+            const observer = new MutationObserver(mutations => {
+                const addedIcons = mutations.some(mutation => Array.from(mutation.addedNodes).some(containsIcon));
+                if (!addedIcons || refreshQueued) return;
+                refreshQueued = true;
+                requestAnimationFrame(() => {
+                    refreshQueued = false;
+                    if (window.lucide) lucide.createIcons();
+                });
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            if (window.lucide) lucide.createIcons();
         },
 
-        icon(name, cls) { return '<i data-lucide="' + name + '" class="' + (cls || '') + '"></i>'; },
-        key(s, u) { return s + '|' + u; },
+        animateView(view) {
+            if (!Element.prototype.animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+            const screen = Array.from(document.querySelectorAll('main > [x-show]'))
+                .find(element => element.getAttribute('x-show') === "view === '" + view + "'");
+            if (!screen) return;
+
+            const targets = [...screen.querySelectorAll('.dashboard-heading, .overview-panel, .store-browser, .region-section, .store-card, .card')];
+            targets.forEach((target, index) => target.animate(
+                [{ opacity: 0, transform: 'translateY(12px)' }, { opacity: 1, transform: 'translateY(0)' }],
+                { duration: 340, delay: Math.min(index * 28, 280), easing: 'cubic-bezier(.2,.7,.2,1)' }
+            ));
+        },
+
+        icon(name, cls) {
+            const safeName = SHEET_ICONS.includes(name) || ['circle-check'].includes(name) ? name : 'package';
+            const safeClass = /^[a-z0-9\s-]*$/i.test(String(cls || '')) ? cls : '';
+            return '<i data-lucide="' + safeName + '" class="' + safeClass + '"></i>';
+        },
+        key(s, u) { return this.activeMonth + '|' + s + '|' + u; },
+        get monthLabel() { return formatMonth(this.activeMonth); },
+        syncCurrentMonth() {
+            const currentMonth = localMonth();
+            if (currentMonth === this.activeMonth) return false;
+            this.commitDraftNow();
+            this.activeMonth = currentMonth;
+            if (this.view === 'form' && this.activeUnit.id) this.loadForm(this.activeUnit);
+            this.saveNow();
+            this.toast('Periode pencatatan sekarang ' + formatMonth(currentMonth));
+            return true;
+        },
         toast(msg, type = 'ok') {
             this.toastMsg = msg; this.toastType = type;
             clearTimeout(this.toastTimer);
@@ -621,9 +759,11 @@ function app() {
             store.set('session', {
                 view: view === 'reader' ? 'units' : view,
                 storeId: this.activeToko.id || '',
-                unitId: view === 'form' ? (this.activeUnit.id || '') : ''
+                unitId: view === 'form' ? (this.activeUnit.id || '') : '',
+                activeMonth: this.activeMonth
             });
             window.scrollTo({ top: 0 });
+            this.$nextTick(() => this.animateView(view));
         },
         openStore(t) { this.activeToko = t; this.activeUnit = {}; this.ensureSuperAdminUnit(t); this.go('units'); },
 
@@ -679,7 +819,7 @@ function app() {
                 .filter(s => !q || (s.code + ' ' + s.nama + ' ' + s.alamat).toLowerCase().includes(q));
         },
         get settingsTitle() {
-            const map = { menu: 'Pengaturan', sheets: 'Sheet & Form', stores: 'Toko', regions: 'Wilayah', pin: 'Ubah PIN Security', data: 'Data & Cadangan' };
+            const map = { menu: 'Pengaturan', sheets: 'Jenis pemeriksaan', stores: 'Toko', regions: 'Wilayah', pin: 'Ubah PIN keamanan', data: 'Data & Cadangan' };
             if (this.settingsPage === 'sheetEdit') return this.currentSheet ? this.currentSheet.name : 'Sheet';
             return map[this.settingsPage] || 'Pengaturan';
         },
@@ -687,7 +827,7 @@ function app() {
             const edit = !!this.modal.data.id;
             const map = {
                 store: edit ? 'Edit toko' : 'Toko baru', region: edit ? 'Edit wilayah' : 'Wilayah baru',
-                sheet: edit ? 'Ubah sheet' : 'Sheet baru', field: edit ? 'Edit pertanyaan' : 'Pertanyaan baru', unit: 'Ganti nama unit'
+                sheet: edit ? 'Ubah jenis pemeriksaan' : 'Jenis pemeriksaan baru', field: edit ? 'Ubah pertanyaan' : 'Pertanyaan baru', unit: 'Ganti nama unit'
             };
             return map[this.modal.type] || '';
         },
@@ -748,13 +888,16 @@ function app() {
         regionName(id) { const r = this.regions.find(x => x.id === id); return r ? r.name : ''; },
         regionColor(id) {
             const r = this.regions.find(x => x.id === id);
-            return (r && REGION_COLORS[r.id]) ? REGION_COLORS[r.id] : (r ? r.color : '#94a3b8');
+            return r ? r.color : '#94a3b8';
         },
         regionStoreCount(id) { return this.stores.filter(s => s.regionId === id).length; },
         mapsUrl(t) {
             if (!t) return '#';
             if (t.maps && t.maps.trim()) {
-                return t.maps.trim();
+                try {
+                    const url = new URL(t.maps.trim());
+                    return ['https:', 'http:'].includes(url.protocol) ? url.href : '#';
+                } catch (e) { return '#'; }
             }
             const query = [t.nama, t.alamat].filter(Boolean).join(' ');
             return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
@@ -780,7 +923,7 @@ function app() {
             return sp.total > 0 && sp.done === sp.total ? 'background:#d1fae5;color:#047857' : 'background:' + sp.sheet.color + '1a;color:' + sp.sheet.color;
         },
         storeCardStyle(t, r) {
-            const color = REGION_COLORS[r.id] || r.color;
+            const color = r.color;
             const base = 'border-left:4px solid ' + color + ';';
             return this.isStoreDone(t.id) ? base + 'background:#f0fdf4;' : base;
         },
@@ -876,8 +1019,7 @@ function app() {
             const ok = await this.ask('Hapus ' + unit.name + '?', 'Data isian unit ini ikut terhapus.', 'Hapus', true);
             if (!ok) return;
             this.units[this.activeToko.id] = list.filter(u => u.id !== unit.id);
-            const k = this.key(this.activeToko.id, unit.id);
-            delete this.records[k]; delete this.drafts[k];
+            this.purgeUnit(this.activeToko.id, unit.id);
             if (this.readerUnitId === unit.id) this.readerUnitId = 'all';
             this.saveNow();
         },
@@ -1084,11 +1226,11 @@ function app() {
             this.requestWakeLock();
 
             if (!window.isSecureContext) {
-                this.scanStatus = 'Kamera live butuh HTTPS. Gunakan tombol "Foto label (Barcode+OCR)".';
+                this.scanStatus = 'Kamera langsung memerlukan HTTPS. Gunakan opsi pindai dari foto.';
                 return;
             }
 
-            this.scanStatus = 'Menyiapkan kamera autofokus...';
+            this.scanStatus = 'Menyiapkan kamera fokus otomatis...';
             await this.$nextTick();
 
             try {
@@ -1143,7 +1285,7 @@ function app() {
                 setTimeout(() => this.detectCameraCapabilities(), 350);
             } catch (e) {
                 scannerInstance = null;
-                this.scanStatus = 'Kamera tidak dapat diakses.';
+                this.scanStatus = 'Kamera tidak dapat diakses. Periksa izin kamera perangkat.';
             }
         },
 
@@ -1359,7 +1501,7 @@ function app() {
             ev.target.value = '';
             if (!file) return;
             const q = this.scanTarget;
-            this.scanStatus = 'Membaca foto...';
+            this.scanStatus = 'Membaca kode dari foto...';
             await this.stopCamera();
 
             let reader;
@@ -1367,8 +1509,9 @@ function app() {
                 reader = new Html5Qrcode('scan-file', scanConfig());
                 const text = await reader.scanFile(file, false);
                 playScanBeep();
-                await this.closeScanner();
-                this.handleScan(text);
+                this.scanBusy = false;
+                await this.handleScan(text);
+                if (this.scanOpen) await this.startCameraStream();
                 return;
             } catch (e) {
             } finally {
@@ -1519,13 +1662,18 @@ function app() {
             if (!ok) return;
             this.stores = this.stores.filter(s => s.id !== id);
             delete this.units[id];
-            this.purge(id + '|');
+            this.purge('|' + id + '|');
             if (this.activeToko.id === id) { this.activeToko = {}; this.activeUnit = {}; }
             this.saveNow(); this.closeModal(); this.toast('Toko dihapus');
         },
-        purge(prefix) {
-            Object.keys(this.records).forEach(k => { if (k.startsWith(prefix)) delete this.records[k]; });
-            Object.keys(this.drafts).forEach(k => { if (k.startsWith(prefix)) delete this.drafts[k]; });
+        purge(storePrefix) {
+            Object.keys(this.records).forEach(k => { if (k.includes(storePrefix)) delete this.records[k]; });
+            Object.keys(this.drafts).forEach(k => { if (k.includes(storePrefix)) delete this.drafts[k]; });
+        },
+        purgeUnit(storeId, unitId) {
+            const suffix = '|' + storeId + '|' + unitId;
+            Object.keys(this.records).forEach(k => { if (k.endsWith(suffix)) delete this.records[k]; });
+            Object.keys(this.drafts).forEach(k => { if (k.endsWith(suffix)) delete this.drafts[k]; });
         },
 
         openRegionModal(r) {
@@ -1543,7 +1691,10 @@ function app() {
                 if (r) { r.name = name; r.color = d.color; }
                 this.toast('Wilayah diperbarui');
             } else {
-                this.regions.push({ id: name.toLowerCase().replace(/[^a-z0-9]/g, '_') || ('rg_' + uid()), name, color: d.color });
+                const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'wilayah';
+                const baseId = isSafeId(slug) ? slug : 'wilayah_' + uid();
+                const id = this.regions.some(region => region.id === baseId) ? baseId + '_' + uid() : baseId;
+                this.regions.push({ id, name, color: d.color });
                 this.toast('Wilayah ditambahkan');
             }
             this.saveNow(); this.closeModal();
@@ -1601,8 +1752,7 @@ function app() {
             if (!ok) return;
             this.stores.forEach(s => {
                 (this.units[s.id] || []).filter(u => u.sheetId === id).forEach(u => {
-                    const k = this.key(s.id, u.id);
-                    delete this.records[k]; delete this.drafts[k];
+                    this.purgeUnit(s.id, u.id);
                 });
                 this.units[s.id] = (this.units[s.id] || []).filter(u => u.sheetId !== id);
             });
@@ -1663,7 +1813,9 @@ function app() {
 
         csvCell(v) {
             let s = String(v == null ? '' : v);
-            if (/^[=+\-@]/.test(s) && !/^-?\d+([.,]\d+)?$/.test(s)) s = "'" + s;
+            const formulaLike = /^\s*[=+\-@]/.test(s);
+            const numericValue = /^\s*-?\d+([.,]\d+)?\s*$/.test(s);
+            if (formulaLike && !numericValue) s = "'" + s;
             return '"' + s.replace(/"/g, '""') + '"';
         },
         download(name, mime, text) {
@@ -1673,7 +1825,10 @@ function app() {
             document.body.appendChild(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 4000);
         },
-        today() { return new Date().toISOString().slice(0, 10); },
+        today() {
+            const now = new Date();
+            return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+        },
         statusOf(s, u) { return this.isUnitDone(s, u) ? 'Selesai' : (this.drafts[this.key(s, u)] ? 'Draft' : 'Belum'); },
         valuesOf(s, u) {
             const k = this.key(s, u);
@@ -1687,13 +1842,13 @@ function app() {
                 (this.units[s.id] || []).filter(u => u.sheetId === sh.id).forEach(u => {
                     const rec = this.records[this.key(s.id, u.id)];
                     const vals = this.valuesOf(s.id, u.id);
-                    rows.push([r.name, s.code, s.nama, s.alamat, u.name, this.statusOf(s.id, u.id), rec && rec.at ? new Date(rec.at).toLocaleString('id-ID') : '', ...sh.fields.map(f => vals[f.id] || '')]);
+                    rows.push([this.monthLabel, r.name, s.code, s.nama, s.alamat, u.name, this.statusOf(s.id, u.id), rec && rec.at ? new Date(rec.at).toLocaleString('id-ID') : '', ...sh.fields.map(f => vals[f.id] || '')]);
                 });
             }));
             if (!rows.length) return this.toast('Belum ada unit untuk sheet ini', 'error');
-            const head = ['Wilayah', 'Kode Toko', 'Toko', 'Alamat', 'Unit', 'Status', 'Terakhir disimpan', ...sh.fields.map(f => f.label)];
+            const head = ['Periode', 'Wilayah', 'Kode Toko', 'Toko', 'Alamat', 'Unit', 'Status', 'Terakhir disimpan', ...sh.fields.map(f => f.label)];
             const csv = '\ufeff' + [head, ...rows].map(r => r.map(c => this.csvCell(c)).join(',')).join('\r\n');
-            this.download('alfamidi-' + sh.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + this.today() + '.csv', 'text/csv;charset=utf-8;', csv);
+            this.download('alfamidi-' + sh.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + this.activeMonth + '.csv', 'text/csv;charset=utf-8;', csv);
             this.toast('CSV ' + sh.name + ' diunduh');
         },
         exportAllCsv() {
@@ -1703,13 +1858,13 @@ function app() {
                     const sh = this.sheetOf(u);
                     if (!sh) return;
                     const vals = this.valuesOf(s.id, u.id);
-                    sh.fields.forEach(f => rows.push([r.name, s.code, s.nama, s.alamat, sh.name, u.name, this.statusOf(s.id, u.id), f.section, f.label, vals[f.id] || '']));
+                    sh.fields.forEach(f => rows.push([this.monthLabel, r.name, s.code, s.nama, s.alamat, sh.name, u.name, this.statusOf(s.id, u.id), f.section, f.label, vals[f.id] || '']));
                 });
             }));
             if (!rows.length) return this.toast('Belum ada data untuk diekspor', 'error');
-            const head = ['Wilayah', 'Kode Toko', 'Toko', 'Alamat', 'Sheet', 'Unit', 'Status', 'Seksi', 'Pertanyaan', 'Jawaban'];
+            const head = ['Periode', 'Wilayah', 'Kode Toko', 'Toko', 'Alamat', 'Jenis pemeriksaan', 'Unit', 'Status', 'Bagian', 'Pertanyaan', 'Jawaban'];
             const csv = '\ufeff' + [head, ...rows].map(r => r.map(c => this.csvCell(c)).join(',')).join('\r\n');
-            this.download('alfamidi-semua-data-' + this.today() + '.csv', 'text/csv;charset=utf-8;', csv);
+            this.download('alfamidi-semua-data-' + this.activeMonth + '.csv', 'text/csv;charset=utf-8;', csv);
             this.toast('CSV semua data berhasil diunduh');
         },
         backupJson() {
@@ -1740,7 +1895,8 @@ function app() {
         async resetProgress() {
             const ok = await this.ask('Reset progress?', 'Semua isian dan status selesai dihapus.', 'Reset', true);
             if (!ok) return;
-            this.records = {}; this.drafts = {};
+            Object.keys(this.records).forEach(key => { if (key.startsWith(this.activeMonth + '|')) delete this.records[key]; });
+            Object.keys(this.drafts).forEach(key => { if (key.startsWith(this.activeMonth + '|')) delete this.drafts[key]; });
             this.formData = {}; this.draftDirty = false; this.activeUnit = {};
             this.saveNow();
             this.toast('Progress direset');
@@ -1749,7 +1905,9 @@ function app() {
             const ok = await this.ask('Kembalikan ke bawaan?', 'Pengaturan awal dan PIN default akan diterapkan kembali.', 'Kembalikan', true);
             if (!ok) return;
             store.del('custom_pin_hash');
+            store.del('pin_security');
             this.correctPinHash = DEFAULT_PIN_HASH;
+            this.pinSecurity = { failures: 0, lockedUntil: 0 };
             this.applyState(sanitizeState(buildDefaultState()));
             this.activeToko = {}; this.activeUnit = {}; this.formData = {}; this.draftDirty = false;
             this.readerUnitId = 'all';
