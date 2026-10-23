@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Field Tracker">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Alfamidi Field Tracker</title>
+
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%23dc2626'/%3E%3Cpath d='M128 192h256l-24 192H152L128 192zm32-64h192l24 64H136l24-64z' fill='none' stroke='%23fff' stroke-width='28' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M208 264v56M304 264v56' stroke='%23fff' stroke-width='28' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%23dc2626'/%3E%3Cpath d='M128 192h256l-24 192H152L128 192zm32-64h192l24 64H136l24-64z' fill='none' stroke='%23fff' stroke-width='28' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M208 264v56M304 264v56' stroke='%23fff' stroke-width='28' stroke-linecap='round'/%3E%3C/svg%3E">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+    <link rel="stylesheet" href="style.css?v=2.0.5">
+    <script src="app.js?v=2.0.5"></script>
+
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen pb-24" x-data="app()" :class="{ 'overflow-hidden': modal.open || confirmState.open || scanOpen || ocrChoiceModal.open }">
+
+<!-- SPLASH SCREEN -->
+<div x-show="isLoading" x-transition.opacity class="fixed inset-0 z-[100] bg-slate-900 grid place-items-center text-center p-6">
+    <div class="space-y-4 anim-up">
+        <div class="mx-auto w-16 h-16 rounded-2xl bg-red-600 grid place-items-center shadow-xl shadow-red-600/40 text-white">
+            <i data-lucide="store" class="w-8 h-8"></i>
+        </div>
+        <div>
+            <h1 class="text-xl font-bold text-white">Alfamidi Field Tracker</h1>
+            <p class="text-xs text-slate-400 mt-1">Memuat aplikasi & sistem keamanan...</p>
+        </div>
+        <div class="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mt-2"></div>
+    </div>
+</div>
+
+<!-- LOCK SCREEN PIN -->
+<div x-show="!isLoading && isLocked" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900 p-4">
+    <div class="w-full max-w-sm rounded-2xl bg-slate-800 p-6 shadow-2xl border border-slate-700 text-center">
+        <div class="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-red-600/20 text-red-500">
+            <i data-lucide="lock" class="h-7 w-7"></i>
+        </div>
+        <h2 class="text-xl font-bold text-white">Aplikasi Terkunci</h2>
+        <p class="mt-1 text-xs text-slate-400">Masukkan 5 digit PIN rahasia Anda.</p>
+        
+        <form @submit.prevent="unlockApp()" class="mt-5 space-y-4" autocomplete="off">
+            <div class="relative">
+                <input :type="showPinAuth ? 'text' : 'password'" x-model="pinInput" maxlength="5" placeholder="PIN" autofocus
+                       inputmode="numeric" pattern="[0-9]*" autocomplete="new-password"
+                       class="w-full rounded-xl bg-slate-900 px-4 py-3 text-center text-xl font-mono tracking-widest text-white placeholder-slate-600 border border-slate-700 focus:border-red-500 focus:outline-none">
+                <button type="button" @click="showPinAuth = !showPinAuth" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
+                    <i :data-lucide="showPinAuth ? 'eye-off' : 'eye'" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <button type="submit" class="w-full rounded-xl bg-red-600 py-3 font-semibold text-white transition hover:bg-red-700 shadow-lg shadow-red-600/30">
+                Buka Aplikasi
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- HEADER -->
+<header class="site-header sticky top-0 z-30" style="padding-top: env(safe-area-inset-top)">
+    <div class="site-header-inner max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-2">
+        <button class="flex items-center gap-3 text-left min-w-0" @click="go('dashboard')">
+            <span class="brand-mark w-9 h-9 rounded-xl grid place-items-center shrink-0">
+                <i data-lucide="store" class="w-5 h-5"></i>
+            </span>
+            <span class="min-w-0">
+                <span class="flex items-center gap-1.5 flex-wrap">
+                    <span class="brand-title font-bold text-sm leading-tight truncate">Alfamidi Field Tracker</span>
+                    <span x-show="!isOnline" x-cloak class="offline-badge px-1.5 py-0.5 text-[10px] font-extrabold rounded">OFFLINE</span>
+                </span>
+                <span class="brand-subtitle block text-[11px] truncate" x-text="headerSubtitle"></span>
+            </span>
+        </button>
+
+        <div class="flex items-center gap-1.5 shrink-0">
+            <button x-show="pwaPrompt" x-cloak @click="installPwa()" class="btn btn-primary install-button" style="padding: 8px 12px; font-size: 12px;">
+                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                <span class="hidden sm:inline">Install App</span>
+            </button>
+            <button @click="openSettings()" class="btn btn-soft settings-button">
+                <i data-lucide="settings" class="w-4 h-4"></i>
+                <span class="hidden sm:inline">Pengaturan</span>
+            </button>
+        </div>
+    </div>
+</header>
+
+<!-- TOAST NOTIFICATION -->
+<div x-show="toastMsg" x-cloak x-transition.opacity role="status"
+     class="fixed left-1/2 -translate-x-1/2 bottom-6 z-[90] px-4 py-3 rounded-xl shadow-xl text-xs font-bold text-white max-w-[90vw] text-center"
+     :class="toastType === 'error' ? 'bg-red-600' : 'bg-slate-900'" x-text="toastMsg"></div>
+
+<!-- CONFIRM DIALOG -->
+<div x-show="confirmState.open" x-cloak x-transition.opacity
+     class="fixed inset-0 z-[80] grid place-items-center p-6 bg-slate-900/60 backdrop-blur-sm" @click.self="answer(false)">
+    <div class="card w-full max-w-sm p-5 space-y-4 anim-up shadow-2xl" role="dialog" aria-modal="true">
+        <div>
+            <h3 class="font-extrabold text-base" x-text="confirmState.title"></h3>
+            <p class="text-sm text-slate-600 mt-1.5 leading-relaxed" x-text="confirmState.message"></p>
+        </div>
+        <div class="flex gap-2 justify-end">
+            <button class="btn btn-soft" @click="answer(false)">Batal</button>
+            <button class="btn" :class="confirmState.danger ? 'btn-primary' : 'btn-dark'" @click="answer(true)" x-text="confirmState.okLabel"></button>
+        </div>
+    </div>
+</div>
+
+<!-- OCR RESULT MODAL -->
+<div x-show="ocrChoiceModal.open" x-cloak x-transition.opacity
+     class="fixed inset-0 z-[75] grid place-items-center p-5 bg-slate-900/75 backdrop-blur-sm" @click.self="ocrChoiceModal.open = false">
+    <div class="card w-full max-w-md p-5 space-y-4 anim-up shadow-2xl">
+        <div class="flex items-start justify-between gap-3">
+            <div>
+                <span class="inline-flex items-center gap-1 text-[11px] font-extrabold uppercase tracking-wider text-amber-600">
+                    <i data-lucide="scan-text" class="w-3.5 h-3.5"></i> Hasil Pembacaan Teks (OCR)
+                </span>
+                <h3 class="font-extrabold text-base mt-0.5" x-text="ocrChoiceModal.fieldLabel"></h3>
+            </div>
+            <button class="btn btn-soft btn-icon shrink-0" @click="ocrChoiceModal.open = false" aria-label="Tutup"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+
+        <div x-show="ocrChoiceModal.previewUrl" class="rounded-xl overflow-hidden border border-slate-200 bg-slate-950 max-h-28 flex items-center justify-center">
+            <img :src="ocrChoiceModal.previewUrl" alt="Preview OCR" class="max-h-28 object-contain">
+        </div>
+
+        <div x-show="ocrChoiceModal.candidates.length" class="space-y-1.5">
+            <label class="lbl">Tap hasil yang sesuai:</label>
+            <div class="flex flex-wrap gap-2">
+                <template x-for="cand in ocrChoiceModal.candidates" :key="cand">
+                    <button type="button" class="chip mono text-xs" :class="ocrChoiceModal.editedText === cand && 'on'" @click="ocrChoiceModal.editedText = cand" x-text="cand"></button>
+                </template>
+            </div>
+        </div>
+
+        <div>
+            <label class="lbl">Koreksi manual jika ada huruf salah:</label>
+            <input type="text" class="inp mono font-bold" x-model="ocrChoiceModal.editedText" placeholder="Ketik kode..." autocapitalize="characters" autocomplete="off" spellcheck="false" @keydown.enter.prevent="confirmOcrText()">
+        </div>
+
+        <div class="flex gap-2 justify-end pt-1">
+            <button class="btn btn-soft" @click="ocrChoiceModal.open = false">Batal</button>
+            <button class="btn btn-primary flex-1" @click="confirmOcrText()"><i data-lucide="check" class="w-4 h-4"></i> Gunakan Teks</button>
+        </div>
+    </div>
+</div>
+
+<!-- BOTTOM SHEET MODAL (CREATE / EDIT) -->
+<div x-show="modal.open" x-cloak x-transition.opacity
+     class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-sm sm:p-4"
+     style="padding-top: env(safe-area-inset-top)" @click.self="closeModal()">
+    <div class="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl flex flex-col shadow-2xl anim-up overflow-hidden"
+         style="max-height: calc(100dvh - env(safe-area-inset-top) - 12px); padding-bottom: env(safe-area-inset-bottom)">
+
+        <div class="shrink-0 flex items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-slate-100">
+            <h3 class="font-extrabold text-base truncate" x-text="modalTitle"></h3>
+            <button class="btn btn-soft btn-icon shrink-0" @click="closeModal()"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+
+        <div class="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4" style="-webkit-overflow-scrolling: touch;">
+            <!-- STORE FORM -->
+            <template x-if="modal.type === 'store'">
+                <div class="space-y-4">
+                    <div>
+                        <label class="lbl">Kode Toko (misal: 044B, NB46)</label>
+                        <input class="inp mono uppercase font-bold" x-model="modal.data.code" placeholder="044B" @input="modal.data.code = $event.target.value.toUpperCase()">
+                    </div>
+                    <div>
+                        <label class="lbl">Nama Toko (Otomatis Kapital)</label>
+                        <input class="inp font-bold uppercase" x-model="modal.data.nama" placeholder="044B - SUPER GAJAHMADA" @input="modal.data.nama = $event.target.value.toUpperCase()">
+                    </div>
+                    <div><label class="lbl">Alamat Toko</label><input class="inp" x-model="modal.data.alamat" placeholder="Jl. Raya ..."></div>
+                    <div>
+                        <label class="lbl">Wilayah Toko</label>
+                        <div class="flex flex-wrap gap-2">
+                            <template x-for="r in regions" :key="r.id">
+                                <button type="button" class="chip" :class="modal.data.regionId === r.id && 'on'" @click="modal.data.regionId = r.id" x-text="r.name"></button>
+                            </template>
+                        </div>
+                    </div>
+                    <div><label class="lbl">Link Google Maps (opsional)</label><input class="inp" x-model="modal.data.maps" placeholder="https://maps.google.com/..."></div>
+                </div>
+            </template>
+
+            <!-- REGION FORM -->
+            <template x-if="modal.type === 'region'">
+                <div class="space-y-4">
+                    <div><label class="lbl">Nama Wilayah</label><input class="inp uppercase font-bold" x-model="modal.data.name" placeholder="MALANG" @input="modal.data.name = $event.target.value.toUpperCase()"></div>
+                    <div>
+                        <label class="lbl">Warna Penanda</label>
+                        <div class="flex flex-wrap gap-2.5">
+                            <template x-for="c in paletteColors" :key="c">
+                                <button type="button" class="w-9 h-9 rounded-full border-2" :style="`background:${c};border-color:${modal.data.color === c ? '#0f172a' : 'transparent'}`" @click="modal.data.color = c"></button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- SHEET FORM -->
+            <template x-if="modal.type === 'sheet'">
+                <div class="space-y-4">
+                    <div><label class="lbl">Nama Sheet</label><input class="inp" x-model="modal.data.name" placeholder="mis. CCTV"></div>
+                    <div><label class="lbl">Sebutan Unit</label><input class="inp" x-model="modal.data.unitLabel" placeholder="mis. Camera"></div>
+                    <div>
+                        <label class="lbl">Jumlah Unit Default</label>
+                        <div class="flex items-center gap-3">
+                            <button type="button" class="btn btn-soft btn-icon" @click="modal.data.defaultCount = Math.max(0, modal.data.defaultCount - 1)">−</button>
+                            <span class="w-10 text-center font-extrabold text-lg" x-text="modal.data.defaultCount"></span>
+                            <button type="button" class="btn btn-soft btn-icon" @click="modal.data.defaultCount = Math.min(10, modal.data.defaultCount + 1)">+</button>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- FIELD FORM (FIXED DEDICATED TAG/SCAN SETTING PER COLUMN) -->
+            <template x-if="modal.type === 'field'">
+                <div class="space-y-3.5">
+                    <div><label class="lbl">Pertanyaan / Label Kolom</label><input class="inp" x-model="modal.data.label" placeholder="mis. MAC Address AP / Kondisi Fisik"></div>
+                    <div>
+                        <label class="lbl">Jenis Isian</label>
+                        <div class="flex flex-wrap gap-1.5">
+                            <template x-for="t in fieldTypes" :key="t.id">
+                                <button type="button" class="chip chip-sm" :class="modal.data.type === t.id && 'on'" @click="modal.data.type = t.id" x-text="t.label"></button>
+                            </template>
+                        </div>
+                    </div>
+                    <div><label class="lbl">Seksi / Kategori Kolom</label><input class="inp" x-model="modal.data.section" placeholder="mis. Kondisi Fisik"></div>
+                    <div><label class="lbl">Placeholder / Petunjuk Input</label><input class="inp" x-model="modal.data.placeholder" placeholder="mis. Masukkan nomor seri..."></div>
+                    <div>
+                        <label class="flex items-center gap-2.5 cursor-pointer pt-1">
+                            <input type="checkbox" x-model="modal.data.scan" class="w-4 h-4 rounded text-red-600 focus:ring-red-500">
+                            <span class="text-xs font-bold text-slate-700">Aktifkan Tombol Scan Barcode / Kamera pada Kolom Ini</span>
+                        </label>
+                    </div>
+                    <template x-if="['text', 'number', 'choice', 'mac'].includes(modal.data.type)">
+                        <div>
+                            <label class="lbl">Pilihan Cepat (pisahkan dengan koma)</label>
+                            <textarea class="inp" rows="2" x-model="modal.data.optionsText" placeholder="Normal, Rusak, Maintenance"></textarea>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
+            <!-- UNIT FORM -->
+            <template x-if="modal.type === 'unit'">
+                <div><label class="lbl">Nama Unit</label><input class="inp" x-model="modal.data.name" placeholder="mis. Kasir 1"></div>
+            </template>
+        </div>
+
+        <div class="shrink-0 px-5 py-3 border-t border-slate-100 flex gap-2 bg-white">
+            <button x-show="modalCanDelete" class="btn btn-danger" @click="modalDelete()"><i data-lucide="trash-2" class="w-4 h-4"></i> Hapus</button>
+            <button class="btn btn-primary flex-1" @click="modalSave()"><i data-lucide="save" class="w-4 h-4"></i> Simpan</button>
+        </div>
+    </div>
+</div>
+
+<!-- SCANNER OVERLAY -->
+<div x-show="scanOpen" x-cloak class="fixed inset-0 z-[60] bg-black/95 flex flex-col" style="padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);">
+    <div class="flex items-center justify-between p-4 text-white gap-2">
+        <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+                <span class="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-red-400">
+                    <span class="w-2 h-2 rounded-full bg-red-500 animate-ping"></span>
+                    <span x-text="ocrBusy ? 'Membaca OCR...' : 'Scan Tag / Barcode'"></span>
+                </span>
+            </div>
+            <p class="font-bold text-sm truncate mt-0.5" x-text="scanTarget ? scanTarget.label : 'Pindai Tag Kode Toko / Perangkat'"></p>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+            <button x-show="scanHasTorch" @click="toggleTorch()" class="p-2.5 rounded-xl border" :class="scanTorchOn ? 'bg-amber-400 text-slate-900 border-amber-300' : 'bg-slate-800 text-white border-slate-700'"><i data-lucide="flashlight" class="w-5 h-5"></i></button>
+            <button @click="closeScanner()" class="p-2.5 bg-slate-800 border border-slate-700 text-white rounded-xl"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+    </div>
+
+    <div class="flex-1 flex flex-col justify-center items-center px-4 relative overflow-hidden">
+        <div id="scan-box" class="relative w-full max-w-md rounded-2xl overflow-hidden border-2 shadow-2xl bg-slate-950 aspect-[4/3]" :class="ocrBusy ? 'border-amber-400' : 'border-white/20'">
+            <div id="scan-reader"></div>
+            <div class="pointer-events-none absolute z-10 border border-white/30 rounded-xl" style="left:8%; right:8%; top:25%; bottom:25%;">
+                <span class="absolute -top-0.5 -left-0.5 w-6 h-6 border-t-4 border-l-4 border-red-500 rounded-tl-lg"></span>
+                <span class="absolute -top-0.5 -right-0.5 w-6 h-6 border-t-4 border-r-4 border-red-500 rounded-tr-lg"></span>
+                <span class="absolute -bottom-0.5 -left-0.5 w-6 h-6 border-b-4 border-l-4 border-red-500 rounded-bl-lg"></span>
+                <span class="absolute -bottom-0.5 -right-0.5 w-6 h-6 border-b-4 border-r-4 border-red-500 rounded-br-lg"></span>
+                <div class="laser-line" x-show="!ocrBusy"></div>
+            </div>
+        </div>
+        <p class="text-center text-xs text-slate-300 mt-2.5 px-4" x-text="scanStatus"></p>
+    </div>
+
+    <div class="p-4 space-y-2 max-w-md mx-auto w-full">
+        <button @click="captureOcrFromLiveVideo()" :disabled="ocrBusy" class="btn w-full py-3.5 rounded-xl text-xs font-extrabold shadow-lg" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: #0f172a;">
+            <i data-lucide="scan-text" class="w-4 h-4"></i>
+            <span x-text="ocrBusy ? 'Sedang mengekstrak teks...' : 'Baca Teks Label (OCR)'"></span>
+        </button>
+        <div class="grid grid-cols-2 gap-2">
+            <label class="btn bg-slate-800 text-white border border-slate-700 py-3 rounded-xl cursor-pointer text-xs">
+                <i data-lucide="camera" class="w-4 h-4 text-amber-400"></i> Foto Label
+                <input type="file" accept="image/*" capture="environment" class="hidden" @change="scanFromPhoto($event)">
+            </label>
+            <button @click="setQuickNoTagging()" class="btn bg-slate-800 text-white border border-slate-700 py-3 rounded-xl text-xs">
+                <i data-lucide="ban" class="w-4 h-4 text-red-400"></i> Set "No Tagging"
+            </button>
+        </div>
+    </div>
+</div>
+<div id="scan-file" class="hidden"></div>
+
+<!-- MAIN CONTENT -->
+<main class="app-main max-w-5xl mx-auto p-4 md:p-6 space-y-6">
+
+    <!-- VIEW: DASHBOARD -->
+    <div x-show="view === 'dashboard'" x-cloak class="dashboard-view space-y-5">
+        <section class="dashboard-heading">
+            <div>
+                <p class="eyebrow"><span class="eyebrow-dot"></span> OPERASIONAL LAPANGAN</p>
+                <h1>Pemeriksaan toko</h1>
+                <p class="dashboard-intro">Pantau progres perangkat dan lanjutkan pemeriksaan di wilayah Anda.</p>
+            </div>
+            <div class="today-label">
+                <i data-lucide="calendar-days" class="w-4 h-4"></i>
+                <span x-text="new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })"></span>
+            </div>
+        </section>
+
+        <section class="overview-panel">
+            <div class="overview-main">
+                <div class="overview-label"><span class="overview-pulse"></span> PROGRES KUNJUNGAN</div>
+                <div class="overview-count"><strong x-text="doneStores"></strong><span>/ <b x-text="totalStores"></b> toko selesai</span></div>
+                <div class="progress-track"><div class="progress-fill" :style="`width:${progress}%`"></div></div>
+                <p class="overview-caption"><span x-text="doneUnits + ' dari ' + totalUnits + ' unit' "></span> sudah diperiksa</p>
+            </div>
+            <div class="overview-ring-wrap">
+                <div class="overview-ring" :style="`--progress:${progress}%`">
+                    <div><strong x-text="Math.round(progress) + '%' "></strong><span>SELESAI</span></div>
+                </div>
+            </div>
+            <div class="overview-divider"></div>
+            <div class="overview-metrics">
+                <div><span class="metric-icon metric-red"><i data-lucide="store" class="w-4 h-4"></i></span><strong x-text="totalStores"></strong><span>Toko terdaftar</span></div>
+                <div><span class="metric-icon metric-green"><i data-lucide="circle-check" class="w-4 h-4"></i></span><strong x-text="doneUnits"></strong><span>Unit diperiksa</span></div>
+            </div>
+        </section>
+
+        <section class="store-browser">
+            <div class="browser-heading">
+                <div>
+                    <p class="eyebrow">DAFTAR KUNJUNGAN</p>
+                    <h2>Pilih toko untuk mulai</h2>
+                </div>
+                <span class="store-total"><span x-text="totalStores"></span> lokasi</span>
+            </div>
+            <div class="space-y-3">
+            <div class="relative flex gap-2">
+                <div class="relative flex-1">
+                    <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"><i data-lucide="search" class="w-4 h-4"></i></span>
+                    <input class="inp" style="padding-left: 40px" type="search" x-model="search" placeholder="Cari kode, nama, atau lokasi toko...">
+                </div>
+                <button @click="openScanner(null)" class="btn btn-dark scan-store-button shrink-0 px-4" title="Scan Tag Toko" aria-label="Scan tag toko">
+                    <i data-lucide="scan-barcode" class="w-5 h-5"></i><span class="scan-button-label">Scan toko</span>
+                </button>
+            </div>
+
+            <div class="filter-row">
+                <div class="flex gap-2 overflow-x-auto no-scrollbar pb-1 region-filters" aria-label="Filter wilayah">
+                <button class="chip" :class="filterRegion === 'all' && 'on'" @click="filterRegion = 'all'">Semua wilayah</button>
+                <template x-for="r in regions" :key="r.id">
+                    <button class="chip" :class="filterRegion === r.id && 'on'" @click="filterRegion = r.id">
+                        <span class="w-2.5 h-2.5 rounded-full" :style="`background:${r.color}`"></span>
+                        <span x-text="r.name"></span>
+                    </button>
+                </template>
+                </div>
+                <div class="status-filters" role="group" aria-label="Filter status">
+                    <button :class="filterStatus === 'all' ? 'active' : ''" @click="filterStatus = 'all'">Semua</button>
+                    <button :class="filterStatus === 'todo' ? 'active' : ''" @click="filterStatus = 'todo'">Belum</button>
+                    <button :class="filterStatus === 'done' ? 'active' : ''" @click="filterStatus = 'done'">Selesai</button>
+                </div>
+            </div>
+        </div>
+        </section>
+
+        <template x-for="region in visibleRegions" :key="region.id">
+            <section class="region-section">
+                <div class="region-heading">
+                    <h2 class="flex items-center gap-2 font-extrabold text-sm">
+                        <span class="region-marker" :style="`--region-color:${region.color}`"></span>
+                        <span x-text="region.name" class="tracking-wide"></span>
+                    </h2>
+                    <span class="text-xs font-semibold text-slate-500" x-text="regionProgressText(region.id)"></span>
+                </div>
+
+                <div class="store-grid">
+                    <template x-for="toko in regionStores(region.id)" :key="toko.id">
+                        <article class="store-card card" :style="storeCardStyle(toko, region)">
+                            <div class="store-card-content">
+                                <div class="store-card-title">
+                                    <span class="store-code mono" x-text="toko.code"></span>
+                                    <h3 x-text="toko.nama"></h3>
+                                </div>
+                                <p class="store-address"><i data-lucide="map-pin" class="w-3.5 h-3.5"></i><span x-text="toko.alamat"></span></p>
+
+                                <div class="store-progress-list">
+                                    <template x-for="sp in sheetProgress(toko.id)" :key="sp.sheet.id">
+                                        <span class="sheet-progress" :style="spStyle(sp)" x-text="`${sp.sheet.name} ${sp.done}/${sp.total}`"></span>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <div class="store-card-actions">
+                                <a :href="mapsUrl(toko)" target="_blank" rel="noopener noreferrer" class="btn btn-soft btn-icon map-button" title="Buka Google Maps" aria-label="Buka Google Maps" @click.stop>
+                                    <i data-lucide="map" class="w-4 h-4"></i>
+                                </a>
+                                <button class="btn btn-dark open-store-button" @click="openStore(toko)">
+                                    <span x-text="isStoreDone(toko.id) ? 'Lihat' : 'Mulai' "></span><i data-lucide="arrow-up-right" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        </article>
+                    </template>
+                </div>
+            </section>
+        </template>
+
+        <div x-show="visibleRegions.length === 0" class="empty-results">
+            <span><i data-lucide="search-x" class="w-5 h-5"></i></span>
+            <strong>Toko tidak ditemukan</strong>
+            <p>Coba ubah kata pencarian atau filter yang dipilih.</p>
+            <button class="btn btn-soft" @click="resetFilters()">Reset filter</button>
+        </div>
+    </div>
+
+    <!-- VIEW: UNITS -->
+    <div x-show="view === 'units'" x-cloak class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center justify-between gap-2">
+            <button @click="go('dashboard')" class="btn btn-soft"><i data-lucide="arrow-left" class="w-4 h-4"></i> Daftar Toko</button>
+            <button @click="openReader('all')" class="btn" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe">
+                <i data-lucide="book-open" class="w-4 h-4"></i> Mode Baca
+            </button>
+        </div>
+
+        <div class="card p-5 space-y-3">
+            <div class="flex justify-between items-start gap-3">
+                <div class="min-w-0">
+                    <span class="mono text-xs font-black px-2 py-0.5 rounded bg-slate-900 text-white" x-text="activeToko.code"></span>
+                    <h2 class="text-lg font-black tracking-tight mt-1" x-text="activeToko.nama"></h2>
+                    <p class="text-xs text-slate-500" x-text="activeToko.alamat"></p>
+                </div>
+            </div>
+            <div class="w-full bg-slate-200/70 h-2 rounded-full overflow-hidden">
+                <div class="h-full rounded-full bg-gradient-to-r from-red-600 to-emerald-500 transition-all duration-500" :style="`width:${unitPercent(activeToko.id)}%`"></div>
+            </div>
+        </div>
+
+        <template x-for="g in unitGroups" :key="g.sheet.id">
+            <section class="space-y-2.5">
+                <div class="flex items-center justify-between px-1">
+                    <h3 class="flex items-center gap-2 font-extrabold text-sm">
+                        <span class="w-7 h-7 rounded-lg grid place-items-center" :style="`background:${g.sheet.color}1a;color:${g.sheet.color}`" x-html="icon(g.sheet.icon, 'w-4 h-4')"></span>
+                        <span x-text="g.sheet.name"></span>
+                        <span class="text-xs font-semibold text-slate-400" x-text="groupDone(g) + '/' + g.units.length"></span>
+                    </h3>
+                    <button class="btn btn-soft text-xs" @click="addUnit(g.sheet.id)"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Tambah</button>
+                </div>
+
+                <template x-for="unit in g.units" :key="unit.id">
+                    <div class="card p-3.5 flex items-center gap-2.5" :style="isUnitDone(activeToko.id, unit.id) ? 'background:#f0fdf4;border-color:#bbf7d0' : ''">
+                        <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0"
+                              :style="isUnitDone(activeToko.id, unit.id) ? 'background:#d1fae5;color:#047857' : `background:${g.sheet.color}1a;color:${g.sheet.color}`"
+                              x-html="icon(isUnitDone(activeToko.id, unit.id) ? 'circle-check' : g.sheet.icon, 'w-5 h-5')"></span>
+                        <div class="flex-1 min-w-0">
+                            <p class="font-bold text-sm truncate" x-text="unit.name"></p>
+                            <p class="text-[11px] font-semibold" :class="isUnitDone(activeToko.id, unit.id) ? 'text-emerald-600' : 'text-slate-400'"
+                               x-text="isUnitDone(activeToko.id, unit.id) ? 'Selesai diisi' : (hasDraft(activeToko.id, unit.id) ? 'Draft tersimpan' : 'Belum diisi')"></p>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                            <button class="btn btn-soft btn-icon" @click="renameUnit(unit)" title="Ganti Nama Unit"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+                            <button class="btn btn-soft btn-icon text-red-600" @click="deleteUnit(unit)" title="Hapus Unit"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                            <button class="btn btn-dark" @click="openForm(unit)">
+                                <span x-text="isUnitDone(activeToko.id, unit.id) ? 'Edit' : 'Isi Form'"></span>
+                                <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </div>
+                    </div>
+                </template>
+            </section>
+        </template>
+    </div>
+
+    <!-- VIEW: READER MODE -->
+    <div x-show="view === 'reader'" x-cloak class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center justify-between gap-2">
+            <button @click="go('units')" class="btn btn-soft"><i data-lucide="arrow-left" class="w-4 h-4"></i> Daftar Unit</button>
+        </div>
+
+        <div class="card p-4">
+            <span class="mono text-xs font-black px-2 py-0.5 rounded bg-slate-900 text-white" x-text="activeToko.code"></span>
+            <h2 class="text-base font-extrabold tracking-tight mt-1" x-text="activeToko.nama"></h2>
+        </div>
+
+        <template x-for="item in readerItems" :key="item.unit.id">
+            <section class="card overflow-hidden">
+                <div class="p-3.5 flex items-center gap-3 border-b border-slate-100 bg-slate-50">
+                    <span class="w-8 h-8 rounded-lg grid place-items-center" :style="`background:${item.sheet.color}1a;color:${item.sheet.color}`" x-html="icon(item.sheet.icon, 'w-4 h-4')"></span>
+                    <div class="flex-1 min-w-0">
+                        <p class="font-extrabold text-sm truncate" x-text="item.unit.name"></p>
+                    </div>
+                    <button class="btn btn-soft btn-icon" @click="copyUnitText(item)"><i data-lucide="copy" class="w-4 h-4"></i></button>
+                </div>
+
+                <div class="p-2 space-y-1">
+                    <template x-for="row in item.rows" :key="row.id">
+                        <div class="px-3 py-2 flex justify-between items-start border-b border-slate-100 last:border-0">
+                            <span class="text-xs font-medium text-slate-500" x-text="row.label"></span>
+                            <span class="text-xs font-extrabold mono" :class="row.value === 'RUSAK' ? 'text-red-600' : 'text-slate-900'" x-text="row.value || '—'"></span>
+                        </div>
+                    </template>
+                </div>
+            </section>
+        </template>
+    </div>
+
+    <!-- VIEW: FORM -->
+    <div x-show="view === 'form'" x-cloak class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center justify-between gap-2">
+            <button @click="go('units')" class="btn btn-soft"><i data-lucide="arrow-left" class="w-4 h-4"></i> Kembali</button>
+            <div class="flex gap-2">
+                <button x-show="canCopyFromSiblingUnit()" @click="copyFromFirstSiblingUnit()" class="btn btn-soft"><i data-lucide="copy" class="w-4 h-4"></i> Salin Unit 1</button>
+                <button @click="fillDefaultNormals()" class="btn btn-soft"><i data-lucide="wand-sparkles" class="w-4 h-4"></i> Isi Standar (Normal Fix)</button>
+                <button @click="clearForm()" class="btn btn-soft"><i data-lucide="eraser" class="w-4 h-4"></i></button>
+            </div>
+        </div>
+
+        <div class="card p-4">
+            <div class="flex items-center gap-3">
+                <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0" :style="`background:${sheetColor(activeUnit)}1a;color:${sheetColor(activeUnit)}`" x-html="icon(sheetIconOf(activeUnit), 'w-5 h-5')"></span>
+                <div class="min-w-0 flex-1">
+                    <p class="text-[11px] font-bold text-slate-400 truncate" x-text="activeToko.nama"></p>
+                    <h2 class="font-extrabold text-base truncate" x-text="activeUnit.name"></h2>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-5 space-y-5">
+            <template x-for="(q, index) in formFields" :key="q.id">
+                <div class="space-y-2">
+                    <div x-show="sectionOf(formFields, index)" class="pt-3 pb-1 text-xs font-black text-red-600 uppercase tracking-wider border-b border-slate-100 mb-3" x-text="sectionOf(formFields, index)"></div>
+                    <label class="lbl" x-text="`${index + 1}. ${q.label}`"></label>
+
+                    <template x-if="q.type === 'choice'">
+                        <div class="flex flex-wrap gap-2">
+                            <template x-for="opt in choiceOptions(q)" :key="opt">
+                                <button type="button" class="chip py-2.5 px-4 font-bold" :class="formData[q.id] === opt && 'on'" @click="setChoice(q, opt)" x-text="opt"></button>
+                            </template>
+                        </div>
+                    </template>
+
+                    <template x-if="q.type === 'mac'">
+                        <div class="space-y-1.5">
+                            <div class="flex gap-2">
+                                <input type="text" class="inp flex-1 mono font-bold uppercase" :value="formData[q.id] || ''" :placeholder="q.placeholder" @input="onInput(q, $event)" :data-field="index">
+                                <button x-show="q.scan" type="button" @click="openScanner(q)" class="btn btn-dark shrink-0 px-4"><i data-lucide="scan-barcode" class="w-5 h-5"></i></button>
+                            </div>
+                            <p class="text-[11px] font-semibold text-slate-500" x-text="macStatusText(formData[q.id])"></p>
+                        </div>
+                    </template>
+
+                    <template x-if="q.type !== 'choice' && q.type !== 'mac' && q.type !== 'note'">
+                        <div class="flex gap-2">
+                            <input type="text" class="inp flex-1" :value="formData[q.id] || ''" :placeholder="q.placeholder" @input="onInput(q, $event)" :data-field="index">
+                            <button x-show="q.scan" type="button" @click="openScanner(q)" class="btn btn-dark shrink-0 px-4"><i data-lucide="scan-barcode" class="w-5 h-5"></i></button>
+                        </div>
+                    </template>
+
+                    <template x-if="q.type === 'note'">
+                        <textarea class="inp" rows="3" :value="formData[q.id] || ''" :placeholder="q.placeholder" @input="onInput(q, $event)" :data-field="index"></textarea>
+                    </template>
+                </div>
+            </template>
+
+            <button @click="saveForm()" class="btn btn-primary w-full py-4 text-sm font-extrabold shadow-lg shadow-red-600/20">
+                <i data-lucide="circle-check" class="w-5 h-5"></i> Simpan Hasil Pemeriksaan
+            </button>
+        </div>
+    </div>
+
+    <!-- VIEW: SETTINGS -->
+    <div x-show="view === 'settings'" x-cloak class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center gap-3">
+            <button @click="settingsBack()" class="btn btn-soft btn-icon"><i data-lucide="arrow-left" class="w-4 h-4"></i></button>
+            <h2 class="text-lg font-extrabold tracking-tight" x-text="settingsTitle"></h2>
+        </div>
+
+        <!-- SETTINGS: MENU UTAMA -->
+        <template x-if="settingsPage === 'menu'">
+            <div class="space-y-3">
+                <button class="card w-full text-left p-4 flex items-center gap-4 hover:border-slate-300 transition" @click="openSettingsPage('stores')">
+                    <span class="w-11 h-11 rounded-xl grid place-items-center bg-red-100 text-red-600 shadow-sm"><i data-lucide="store" class="w-5 h-5"></i></span>
+                    <span class="flex-1"><span class="block font-bold text-sm">Pengelolaan Toko</span><span class="block text-xs text-slate-500" x-text="stores.length + ' toko terdaftar'"></span></span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                </button>
+
+                <button class="card w-full text-left p-4 flex items-center gap-4 hover:border-slate-300 transition" @click="openSettingsPage('pin')">
+                    <span class="w-11 h-11 rounded-xl grid place-items-center bg-amber-100 text-amber-700 shadow-sm"><i data-lucide="key-round" class="w-5 h-5"></i></span>
+                    <span class="flex-1"><span class="block font-bold text-sm">Ubah PIN Security</span><span class="block text-xs text-slate-500">Atur 5 digit PIN pengunci aplikasi</span></span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                </button>
+
+                <button class="card w-full text-left p-4 flex items-center gap-4 hover:border-slate-300 transition" @click="openSettingsPage('regions')">
+                    <span class="w-11 h-11 rounded-xl grid place-items-center bg-blue-100 text-blue-600 shadow-sm"><i data-lucide="map-pin" class="w-5 h-5"></i></span>
+                    <span class="flex-1"><span class="block font-bold text-sm">Wilayah</span><span class="block text-xs text-slate-500" x-text="regions.length + ' wilayah aktif'"></span></span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                </button>
+
+                <button class="card w-full text-left p-4 flex items-center gap-4 hover:border-slate-300 transition" @click="openSettingsPage('sheets')">
+                    <span class="w-11 h-11 rounded-xl grid place-items-center bg-emerald-100 text-emerald-700 shadow-sm"><i data-lucide="clipboard-list" class="w-5 h-5"></i></span>
+                    <span class="flex-1"><span class="block font-bold text-sm">Sheet & Form Pertanyaan</span><span class="block text-xs text-slate-500" x-text="sheets.length + ' sheet terpasang'"></span></span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                </button>
+
+                <button class="card w-full text-left p-4 flex items-center gap-4 hover:border-slate-300 transition" @click="openSettingsPage('data')">
+                    <span class="w-11 h-11 rounded-xl grid place-items-center bg-purple-100 text-purple-700 shadow-sm"><i data-lucide="database" class="w-5 h-5"></i></span>
+                    <span class="flex-1"><span class="block font-bold text-sm">Data & Cadangan</span><span class="block text-xs text-slate-500">Ekspor CSV, Backup, Restore</span></span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                </button>
+            </div>
+        </template>
+
+        <!-- UBAH PIN FORM -->
+        <template x-if="settingsPage === 'pin'">
+            <div class="card p-5 space-y-4">
+                <div>
+                    <h3 class="font-bold text-sm text-slate-900">Ubah PIN Keamanan</h3>
+                    <p class="text-xs text-slate-500 mt-0.5">PIN harus tepat 5 digit angka.</p>
+                </div>
+
+                <form @submit.prevent="updatePin()" class="space-y-4" autocomplete="off">
+                    <div>
+                        <label class="lbl">PIN Lama</label>
+                        <div class="relative">
+                            <input :type="showOldPin ? 'text' : 'password'" x-model="changePinForm.oldPin" maxlength="5" inputmode="numeric" pattern="[0-9]*" class="inp mono font-bold pr-10" placeholder="*****">
+                            <button type="button" @click="showOldPin = !showOldPin" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"><i :data-lucide="showOldPin ? 'eye-off' : 'eye'" class="w-4 h-4"></i></button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="lbl">PIN Baru (5 Digit Angka)</label>
+                        <div class="relative">
+                            <input :type="showNewPin ? 'text' : 'password'" x-model="changePinForm.newPin" maxlength="5" inputmode="numeric" pattern="[0-9]*" class="inp mono font-bold pr-10" placeholder="*****">
+                            <button type="button" @click="showNewPin = !showNewPin" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"><i :data-lucide="showNewPin ? 'eye-off' : 'eye'" class="w-4 h-4"></i></button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="lbl">Konfirmasi PIN Baru</label>
+                        <div class="relative">
+                            <input :type="showConfirmPin ? 'text' : 'password'" x-model="changePinForm.confirmPin" maxlength="5" inputmode="numeric" pattern="[0-9]*" class="inp mono font-bold pr-10" placeholder="*****">
+                            <button type="button" @click="showConfirmPin = !showConfirmPin" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"><i :data-lucide="showConfirmPin ? 'eye-off' : 'eye'" class="w-4 h-4"></i></button>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-full py-3">Simpan PIN Baru</button>
+                </form>
+            </div>
+        </template>
+
+        <!-- STORES SETTINGS -->
+        <template x-if="settingsPage === 'stores'">
+            <div class="space-y-3">
+                <button class="btn btn-primary w-full" @click="openStoreModal()"><i data-lucide="plus" class="w-4 h-4"></i> Tambah Toko Baru</button>
+                <div class="relative">
+                    <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"><i data-lucide="search" class="w-4 h-4"></i></span>
+                    <input class="inp" style="padding-left: 40px" type="search" x-model="storeSearch" placeholder="Cari kode atau nama toko">
+                </div>
+
+                <template x-for="t in settingsStores" :key="t.id">
+                    <button class="card w-full text-left p-4 flex items-center gap-3 hover:border-slate-300 transition" @click="openStoreModal(t)">
+                        <span class="w-2.5 h-10 rounded-full shrink-0" :style="`background:${regionColor(t.regionId)}`"></span>
+                        <span class="flex-1 min-w-0">
+                            <span class="flex items-center gap-2">
+                                <span class="mono text-xs font-black px-2 py-0.5 rounded bg-slate-900 text-white" x-text="t.code"></span>
+                                <span class="font-extrabold text-sm truncate" x-text="t.nama"></span>
+                            </span>
+                            <span class="block text-xs text-slate-500 truncate mt-0.5" x-text="regionName(t.regionId) + ' · ' + t.alamat"></span>
+                        </span>
+                        <i data-lucide="pencil" class="w-4 h-4 text-slate-400"></i>
+                    </button>
+                </template>
+            </div>
+        </template>
+
+        <!-- REGIONS SETTINGS -->
+        <template x-if="settingsPage === 'regions'">
+            <div class="space-y-3">
+                <button class="btn btn-primary w-full" @click="openRegionModal()"><i data-lucide="plus" class="w-4 h-4"></i> Tambah Wilayah Baru</button>
+                <template x-for="r in regions" :key="r.id">
+                    <button class="card w-full text-left p-4 flex items-center gap-3 hover:border-slate-300 transition" @click="openRegionModal(r)">
+                        <span class="w-8 h-8 rounded-xl shrink-0" :style="`background:${r.color}`"></span>
+                        <span class="flex-1 font-extrabold text-sm" x-text="r.name"></span>
+                        <span class="text-xs text-slate-500 font-bold" x-text="regionStoreCount(r.id) + ' toko'"></span>
+                        <i data-lucide="pencil" class="w-4 h-4 text-slate-400"></i>
+                    </button>
+                </template>
+            </div>
+        </template>
+
+        <!-- SETTINGS: SHEETS & FORM MANAGER -->
+        <template x-if="settingsPage === 'sheets'">
+            <div class="space-y-3">
+                <button class="btn btn-primary w-full py-3 shadow-lg shadow-red-600/20" @click="openSheetModal()"><i data-lucide="plus" class="w-4 h-4"></i> Buat Sheet Baru</button>
+                <template x-for="sh in sheets" :key="sh.id">
+                    <div class="card p-4 flex items-center gap-3">
+                        <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0 shadow-sm" :style="`background:${sh.color}1a;color:${sh.color}`" x-html="icon(sh.icon, 'w-5 h-5')"></span>
+                        <div class="flex-1 min-w-0">
+                            <h3 class="font-extrabold text-sm truncate" x-text="sh.name"></h3>
+                            <p class="text-xs text-slate-500" x-text="sh.fields.length + ' pertanyaan · Default ' + sh.defaultCount + ' ' + sh.unitLabel"></p>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                            <button class="btn btn-soft btn-icon" @click="editSheet(sh.id)"><i data-lucide="settings-2" class="w-4 h-4"></i></button>
+                            <button class="btn btn-soft btn-icon text-red-600 hover:bg-red-50" @click="deleteSheet(sh.id)"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </template>
+
+        <!-- SETTINGS: SHEET DETAIL & FIELDS EDITOR -->
+        <template x-if="settingsPage === 'sheetEdit' && currentSheet">
+            <div class="space-y-4">
+                <div class="card p-4 flex items-center justify-between gap-3">
+                    <div class="flex items-center gap-3 min-w-0">
+                        <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0" :style="`background:${currentSheet.color}1a;color:${currentSheet.color}`" x-html="icon(currentSheet.icon, 'w-5 h-5')"></span>
+                        <div class="min-w-0">
+                            <h3 class="font-extrabold text-sm truncate" x-text="currentSheet.name"></h3>
+                            <p class="text-xs text-slate-500" x-text="currentSheet.fields.length + ' pertanyaan aktif'"></p>
+                        </div>
+                    </div>
+                    <button class="btn btn-soft btn-icon" @click="openSheetModal(currentSheet)"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                </div>
+
+                <button class="btn btn-primary w-full py-3" @click="openFieldModal(currentSheet.id)"><i data-lucide="plus" class="w-4 h-4"></i> Tambah Pertanyaan Baru</button>
+
+                <div class="space-y-2">
+                    <template x-for="(f, idx) in currentSheet.fields" :key="f.id">
+                        <div class="card p-3.5 space-y-2">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0 flex-1">
+                                    <span class="text-[10px] font-extrabold px-2 py-0.5 rounded bg-slate-100 text-slate-600 uppercase tracking-wider" x-text="f.section || 'Umum'"></span>
+                                    <p class="font-bold text-sm mt-1" x-text="`${idx + 1}. ${f.label}`"></p>
+                                    <p class="text-xs text-slate-400 mt-0.5" x-text="fieldMeta(f)"></p>
+                                </div>
+                                <div class="flex items-center gap-1 shrink-0">
+                                    <button class="btn btn-soft btn-icon p-1.5" @click="moveField(currentSheet.id, idx, -1)" :disabled="idx === 0"><i data-lucide="arrow-up" class="w-3.5 h-3.5"></i></button>
+                                    <button class="btn btn-soft btn-icon p-1.5" @click="moveField(currentSheet.id, idx, 1)" :disabled="idx === currentSheet.fields.length - 1"><i data-lucide="arrow-down" class="w-3.5 h-3.5"></i></button>
+                                    <button class="btn btn-soft btn-icon p-1.5" @click="openFieldModal(currentSheet.id, f)"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+                                    <button class="btn btn-soft btn-icon p-1.5 text-red-600" @click="deleteField(currentSheet.id, f.id)"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <!-- SETTINGS: DATA & EXPORT CSV -->
+        <template x-if="settingsPage === 'data'">
+            <div class="space-y-4">
+                <div class="card p-5 space-y-3 shadow-sm">
+                    <h3 class="font-bold text-sm text-slate-900 flex items-center gap-2">
+                        <i data-lucide="file-spreadsheet" class="w-4 h-4 text-emerald-600"></i> Ekspor Laporan CSV
+                    </h3>
+                    <p class="text-xs text-slate-500">Unduh seluruh data hasil pemeriksaan ke format CSV per sheet atau unduh rekapitulasi gabungan.</p>
+                    
+                    <div class="pt-1 space-y-2">
+                        <button class="btn btn-dark w-full py-3 justify-center bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20" @click="exportAllCsv()">
+                            <i data-lucide="download" class="w-4 h-4"></i> Ekspor Semua Data (Gabungan CSV)
+                        </button>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                            <template x-for="sh in sheets" :key="sh.id">
+                                <button class="btn btn-soft justify-start py-2.5" @click="exportSheetCsv(sh.id)">
+                                    <i data-lucide="download" class="w-4 h-4 text-slate-600"></i>
+                                    <span class="truncate" x-text="sh.name"></span>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card p-5 space-y-3 shadow-sm">
+                    <h3 class="font-bold text-sm text-slate-900 flex items-center gap-2">
+                        <i data-lucide="hard-drive" class="w-4 h-4 text-blue-600"></i> Cadangan & Pemulihan (JSON)
+                    </h3>
+                    <div class="flex flex-wrap gap-2 pt-1">
+                        <button class="btn btn-dark" @click="backupJson()"><i data-lucide="download" class="w-4 h-4"></i> Backup JSON</button>
+                        <label class="btn btn-soft cursor-pointer">
+                            <i data-lucide="upload" class="w-4 h-4"></i> Restore JSON
+                            <input type="file" accept="application/json,.json" class="hidden" @change="restoreJson($event)">
+                        </label>
+                    </div>
+                </div>
+
+                <div class="card p-5 space-y-3 border-red-100 bg-red-50/30 shadow-sm">
+                    <h3 class="font-bold text-sm text-red-700 flex items-center gap-2">
+                        <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600"></i> Zona Bahaya
+                    </h3>
+                    <div class="flex flex-wrap gap-2 pt-1">
+                        <button class="btn btn-danger" @click="factoryReset()"><i data-lucide="trash-2" class="w-4 h-4"></i> Reset ke Pengaturan Bawaan</button>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+    </div>
+
+</main>
+
+</body>
+</html>
