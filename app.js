@@ -22,7 +22,7 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.4.0';
+    const APP_VERSION = '2.5.0';
     try {
         if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
     } catch (e) {}
@@ -37,6 +37,7 @@ const isSafeId = value => {
 };
 const uid = () => Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 7);
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const isValidMonth = (value) => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(value || ''));
 const localMonth = () => {
     const now = new Date();
@@ -157,38 +158,144 @@ function playScanBeep() {
     } catch (e) {}
 }
 
-/* ===================== IMAGE ENHANCEMENT & OCR ===================== */
+/* ===================== IMAGE ENHANCEMENT & OCR (v2) ===================== */
 const GUIDE = { w: 0.84, h: 0.50 };
+const NATIVE_FORMATS = ['code_128', 'code_39', 'code_93', 'qr_code', 'ean_13', 'ean_8', 'itf', 'codabar', 'upc_a', 'upc_e', 'data_matrix'];
+const OCR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-:. ';
 
-function preprocessCanvasForOcr(sourceCanvas) {
-    const TARGET_W = 1400;
-    const scale = Math.min(3, Math.max(1, TARGET_W / sourceCanvas.width));
-    const w = Math.round(sourceCanvas.width * scale), h = Math.round(sourceCanvas.height * scale);
-    const out = document.createElement('canvas');
-    out.width = w; out.height = h;
+let nativeDetector;
+let nativeScanTimer = null;
+
+async function getNativeDetector() {
+    if (nativeDetector !== undefined) return nativeDetector;
+    try {
+        const supported = await BarcodeDetector.getSupportedFormats();
+        const formats = NATIVE_FORMATS.filter(f => supported.includes(f));
+        nativeDetector = formats.length ? new BarcodeDetector({ formats }) : null;
+    } catch (e) {
+        nativeDetector = null;
+    }
+    return nativeDetector;
+}
+
+function makeCanvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    return c;
+}
+
+function scaleToWidth(src, targetW) {
+    const scale = Math.min(3, Math.max(0.4, targetW / src.width));
+    const out = makeCanvas(src.width * scale, src.height * scale);
     const ctx = out.getContext('2d', { willReadFrequently: true });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(sourceCanvas, 0, 0, w, h);
-
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const d = imgData.data;
-
-    let sum = 0;
-    for (let i = 0; i < d.length; i += 4) {
-        const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-        d[i] = d[i + 1] = d[i + 2] = lum;
-        sum += lum;
-    }
-    const avg = sum / (d.length / 4);
-    const threshold = avg * 0.88;
-
-    for (let i = 0; i < d.length; i += 4) {
-        const v = d[i] < threshold ? Math.max(0, d[i] * 0.35) : Math.min(255, d[i] * 1.25 + 30);
-        d[i] = d[i + 1] = d[i + 2] = v;
-    }
-    ctx.putImageData(imgData, 0, 0);
+    ctx.drawImage(src, 0, 0, out.width, out.height);
     return out;
+}
+
+/* Ukuran ketajaman (varians Laplacian) untuk memilih frame terbaik. */
+function canvasSharpness(src) {
+    const w = Math.min(240, src.width);
+    const h = Math.max(3, Math.round(src.height * w / src.width));
+    const c = makeCanvas(w, h);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    let sum = 0, sumSq = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+            const i = y * w + x;
+            const lap = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w];
+            sum += lap; sumSq += lap * lap; n++;
+        }
+    }
+    const mean = sum / (n || 1);
+    return sumSq / (n || 1) - mean * mean;
+}
+
+/* Regangkan kontras berdasarkan persentil 2%-98%. */
+function stretchGray(gray) {
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    const total = gray.length;
+    let acc = 0, lo = 0, hi = 255;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= total * 0.02) { lo = i; break; } }
+    acc = 0;
+    for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc >= total * 0.02) { hi = i; break; } }
+    if (hi - lo < 20) return gray;
+    const out = new Uint8ClampedArray(gray.length);
+    const k = 255 / (hi - lo);
+    for (let i = 0; i < gray.length; i++) out[i] = (gray[i] - lo) * k;
+    return out;
+}
+
+/* Threshold adaptif (rata-rata lokal dengan integral image), tahan bayangan & pencahayaan tidak rata. */
+function adaptiveBinarize(gray, w, h, win, c) {
+    const integral = new Float64Array((w + 1) * (h + 1));
+    for (let y = 1; y <= h; y++) {
+        let rowSum = 0;
+        for (let x = 1; x <= w; x++) {
+            rowSum += gray[(y - 1) * w + (x - 1)];
+            integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+        }
+    }
+    const half = Math.max(2, win >> 1);
+    const out = new Uint8ClampedArray(w * h);
+    for (let y = 0; y < h; y++) {
+        const y1 = Math.max(0, y - half), y2 = Math.min(h - 1, y + half);
+        for (let x = 0; x < w; x++) {
+            const x1 = Math.max(0, x - half), x2 = Math.min(w - 1, x + half);
+            const area = (x2 - x1 + 1) * (y2 - y1 + 1);
+            const s = integral[(y2 + 1) * (w + 1) + (x2 + 1)] - integral[y1 * (w + 1) + (x2 + 1)] - integral[(y2 + 1) * (w + 1) + x1] + integral[y1 * (w + 1) + x1];
+            out[y * w + x] = gray[y * w + x] < (s / area) - c ? 0 : 255;
+        }
+    }
+    return out;
+}
+
+function grayToCanvas(gray, w, h, pad = 24) {
+    const tmp = makeCanvas(w, h);
+    const tctx = tmp.getContext('2d');
+    const img = tctx.createImageData(w, h);
+    for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = gray[p];
+        img.data[i + 3] = 255;
+    }
+    tctx.putImageData(img, 0, 0);
+    const out = makeCanvas(w + pad * 2, h + pad * 2);
+    const octx = out.getContext('2d');
+    octx.fillStyle = '#fff';
+    octx.fillRect(0, 0, out.width, out.height);
+    octx.drawImage(tmp, pad, pad);
+    return out;
+}
+
+/* Membuat beberapa varian gambar untuk OCR multi-pass. */
+function buildOcrVariants(sourceCanvas) {
+    const base = scaleToWidth(sourceCanvas, 1800);
+    const w = base.width, h = base.height;
+    const d = base.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+    let gray = new Uint8ClampedArray(w * h);
+    let sum = 0;
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+        const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        gray[p] = lum; sum += lum;
+    }
+    if (sum / gray.length < 100) {
+        for (let i = 0; i < gray.length; i++) gray[i] = 255 - gray[i];
+    }
+    gray = stretchGray(gray);
+    const winA = (Math.max(21, Math.round(w / 14)) | 1);
+    const winB = (Math.max(15, Math.round(w / 30)) | 1);
+    return {
+        gray: grayToCanvas(gray, w, h),
+        adaptive: grayToCanvas(adaptiveBinarize(gray, w, h, winA, 8), w, h),
+        fine: grayToCanvas(adaptiveBinarize(gray, w, h, winB, 12), w, h)
+    };
 }
 
 function extractLabelCandidates(rawText, fieldType) {
@@ -213,6 +320,11 @@ function extractLabelCandidates(rawText, fieldType) {
             const fixed = tok.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/[^0-9A-F]/g, '');
             if (fixed.length === 12) pushUnique(fixed.match(/.{1,2}/g).join('-'));
         });
+
+        const allHex = upper.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/[^0-9A-F]/g, '');
+        for (let i = 0; i + 12 <= allHex.length && candidates.length < 6; i++) {
+            if (i === 0 || allHex.length <= 24) pushUnique(allHex.slice(i, i + 12).match(/.{1,2}/g).join('-'));
+        }
     } else {
         const lines = upper.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
@@ -243,7 +355,24 @@ function extractLabelCandidates(rawText, fieldType) {
         });
     }
 
-    return candidates.slice(0, 6);
+    return candidates.slice(0, 8);
+}
+
+/* Skor kemiripan kandidat dengan pola label tagging / MAC. */
+function scoreCandidate(c, fieldType) {
+    if (fieldType === 'mac') {
+        const hex = String(c).replace(/[^0-9A-F]/g, '');
+        return hex.length === 12 ? 6 : (hex.length > 0 && hex.length % 12 === 0 ? 4 : 0);
+    }
+    let s = 0;
+    const parts = String(c).split('/').filter(Boolean);
+    if (parts.length >= 4) s += 4; else if (parts.length === 3) s += 3; else if (parts.length === 2) s += 1.5;
+    if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) s += 1.5;
+    if (parts.length >= 3 && /^\d{3,5}$/.test(parts[parts.length - 2])) s += 1.5;
+    if (/^S[A-Z0-9]{1,5}$/.test(parts[0] || '')) s += 1;
+    if (c.length >= 6 && c.length <= 26) s += 1; else s -= 1;
+    if (/[^A-Z0-9/-]/.test(c)) s -= 2;
+    return s;
 }
 
 let ocrWorker = null, ocrWorkerLoading = null, ocrLogger = null;
@@ -253,12 +382,55 @@ function getOcrWorker(logger) {
     if (!ocrWorkerLoading) {
         ocrWorkerLoading = (async () => {
             const w = await Tesseract.createWorker('eng', 1, { logger: (m) => { if (ocrLogger) ocrLogger(m); } });
-            try { await w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '0' }); } catch (e) {}
+            try { await w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '0', user_defined_dpi: '300' }); } catch (e) {}
             ocrWorker = w;
             return w;
         })().catch((e) => { ocrWorkerLoading = null; throw e; });
     }
     return ocrWorkerLoading;
+}
+
+/* OCR multi-pass: beberapa varian gambar + mode segmentasi, hasilnya divoting dan diberi skor. */
+async function recognizeBestCandidates(worker, variants, fieldType, onPass) {
+    const passes = [
+        { v: 'gray', psm: '6', wl: true },
+        { v: 'adaptive', psm: '6', wl: true },
+        { v: 'adaptive', psm: '11', wl: false },
+        { v: 'fine', psm: '6', wl: false }
+    ];
+    const votes = new Map();
+    const rawTexts = [];
+
+    for (let i = 0; i < passes.length; i++) {
+        const p = passes[i];
+        if (onPass) onPass(i + 1, passes.length);
+        try {
+            await worker.setParameters({
+                tessedit_pageseg_mode: p.psm,
+                tessedit_char_whitelist: p.wl ? OCR_WHITELIST : ''
+            });
+        } catch (e) {}
+        const res = await worker.recognize(variants[p.v].toDataURL('image/png'));
+        const text = (res && res.data && res.data.text) ? res.data.text : '';
+        const conf = (res && res.data && res.data.confidence) ? res.data.confidence : 0;
+        rawTexts.push(text);
+
+        extractLabelCandidates(text, fieldType).forEach(c => {
+            const e = votes.get(c) || { c, count: 0, base: scoreCandidate(c, fieldType), conf: 0 };
+            e.count++;
+            e.conf = Math.max(e.conf, conf);
+            votes.set(c, e);
+        });
+
+        const top = Array.from(votes.values()).sort((a, b) => (b.base + b.count * 2) - (a.base + a.count * 2))[0];
+        if (top && top.base >= 6.5 && top.count >= 2) break;
+    }
+
+    const ranked = Array.from(votes.values())
+        .sort((a, b) => (b.base + b.count * 2 + b.conf / 50) - (a.base + a.count * 2 + a.conf / 50))
+        .map(e => e.c)
+        .slice(0, 6);
+    return { candidates: ranked, rawText: rawTexts.join('\n') };
 }
 
 /* CONFIG & DATA DEFAULTS */
@@ -483,8 +655,12 @@ const scanConfig = () => ({
         Html5QrcodeSupportedFormats.CODE_93,
         Html5QrcodeSupportedFormats.QR_CODE,
         Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
         Html5QrcodeSupportedFormats.ITF,
-        Html5QrcodeSupportedFormats.CODABAR
+        Html5QrcodeSupportedFormats.CODABAR,
+        Html5QrcodeSupportedFormats.DATA_MATRIX
     ],
     experimentalFeatures: { useBarCodeDetectorIfSupported: true },
     verbose: false
@@ -1118,6 +1294,12 @@ function app() {
             return 'MAC ke-' + count + ' belum lengkap (' + rem + '/12 karakter hex)';
         },
 
+        normalizeTag(v) {
+            let s = String(v || '').trim().replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ');
+            if (s.includes('/')) s = s.toUpperCase();
+            return s;
+        },
+
         onInput(q, ev) {
             let v = ev.target.value;
             if (q.type === 'mac') v = this.formatMac(v);
@@ -1242,6 +1424,7 @@ function app() {
             }
         },
 
+        /* ===================== SCANNER (v2) ===================== */
         async openScanner(q) {
             if (!window.Html5Qrcode) return this.toast('Library scanner belum termuat. Cek koneksi.', 'error');
             this.scanTarget = q;
@@ -1297,13 +1480,13 @@ function app() {
                 await scannerInstance.start(
                     camSource,
                     {
-                        fps: 20,
+                        fps: 15,
                         aspectRatio: 1.333334,
                         disableFlip: false,
                         videoConstraints: {
                             ...camSource,
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
                             focusMode: { ideal: 'continuous' }
                         }
                     },
@@ -1312,10 +1495,36 @@ function app() {
                 );
 
                 setTimeout(() => this.detectCameraCapabilities(), 350);
+                this.startNativeLoop();
             } catch (e) {
                 scannerInstance = null;
                 this.scanStatus = 'Kamera tidak dapat diakses. Periksa izin kamera perangkat.';
             }
+        },
+
+        /* Loop tambahan: BarcodeDetector native membaca seluruh frame video (lebih cepat & toleran blur). */
+        startNativeLoop() {
+            this.stopNativeLoop();
+            const tick = async () => {
+                if (!this.scanOpen) return;
+                try {
+                    if (!this.scanBusy && !this.ocrBusy) {
+                        const video = document.querySelector('#scan-reader video');
+                        if (video && video.readyState >= 2 && video.videoWidth) {
+                            const det = await getNativeDetector();
+                            if (!det) return;
+                            const codes = await det.detect(video);
+                            if (codes && codes.length && codes[0].rawValue) this.handleScan(codes[0].rawValue);
+                        }
+                    }
+                } catch (e) {}
+                nativeScanTimer = setTimeout(tick, 180);
+            };
+            nativeScanTimer = setTimeout(tick, 600);
+        },
+        stopNativeLoop() {
+            if (nativeScanTimer) clearTimeout(nativeScanTimer);
+            nativeScanTimer = null;
         },
 
         detectCameraCapabilities() {
@@ -1327,6 +1536,9 @@ function app() {
                 const caps = track.getCapabilities();
 
                 if (caps.torch) this.scanHasTorch = true;
+                if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+                    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+                }
                 if (caps.zoom) {
                     this.scanZoomMin = caps.zoom.min || 1;
                     this.scanZoomMax = Math.min(caps.zoom.max || 1, 4);
@@ -1379,9 +1591,13 @@ function app() {
             playScanBeep();
             if (navigator.vibrate) navigator.vibrate([50, 30, 50]);
 
+            const q = this.scanTarget;
+            const upperCode = cleaned.toUpperCase();
+
+            // Saat mengisi kolom, hanya kode toko yang persis sama yang dianggap tag toko (hindari salah deteksi).
             const matchedStore = this.stores.find(s =>
-                s.code.toUpperCase() === cleaned.toUpperCase() ||
-                s.nama.toUpperCase().includes(cleaned.toUpperCase())
+                s.code.toUpperCase() === upperCode ||
+                (!q && upperCode.length >= 4 && s.nama.toUpperCase().includes(upperCode))
             );
 
             if (matchedStore) {
@@ -1391,7 +1607,6 @@ function app() {
                 return;
             }
 
-            const q = this.scanTarget;
             if (q) {
                 if (this.scanContinuous) {
                     this.applyScanAndAdvance(cleaned, q);
@@ -1417,57 +1632,93 @@ function app() {
             return { x: Math.floor(sx + (sw - gw) / 2), y: Math.floor(sy + (sh - gh) / 2), w: Math.floor(gw), h: Math.floor(gh) };
         },
 
+        /* Ambil beberapa frame beruntun, pilih yang paling tajam untuk OCR. */
         async captureOcrFromLiveVideo() {
             if (this.ocrBusy) return;
             const videoEl = document.querySelector('#scan-reader video');
             if (!videoEl || !videoEl.videoWidth) return this.toast('Kamera belum siap', 'error');
 
-            const r = this.getGuideCropRect(videoEl);
-            const rawCanvas = document.createElement('canvas');
-            rawCanvas.width = r.w; rawCanvas.height = r.h;
-            rawCanvas.getContext('2d').drawImage(videoEl, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+            this.ocrBusy = true;
+            this.ocrProgressText = 'Mengambil gambar tertajam...';
+            try {
+                let bestCanvas = null, bestScore = -1;
+                for (let i = 0; i < 5; i++) {
+                    const r = this.getGuideCropRect(videoEl);
+                    const c = makeCanvas(r.w, r.h);
+                    c.getContext('2d').drawImage(videoEl, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+                    const sc = canvasSharpness(c);
+                    if (sc > bestScore) { bestScore = sc; bestCanvas = c; }
+                    await sleep(110);
+                }
+                await this.runOcrPipeline(bestCanvas, this.scanTarget);
+            } catch (e) {
+                this.ocrBusy = false;
+                this.toast('Gagal mengambil gambar', 'error');
+            }
+        },
 
-            await this.runOcrPipeline(rawCanvas, this.scanTarget);
+        /* Coba baca barcode dari gambar (native dulu, lalu html5-qrcode pada gambar yang sudah dipertajam). */
+        async tryDecodeBarcode(sourceCanvas, enhancedCanvas) {
+            try {
+                const det = await getNativeDetector();
+                if (det) {
+                    const codes = await det.detect(sourceCanvas);
+                    if (codes && codes.length && String(codes[0].rawValue || '').trim().length >= 2) return String(codes[0].rawValue).trim();
+                    const codes2 = await det.detect(enhancedCanvas);
+                    if (codes2 && codes2.length && String(codes2[0].rawValue || '').trim().length >= 2) return String(codes2[0].rawValue).trim();
+                }
+            } catch (e) {}
+
+            let qrReader = null;
+            try {
+                const blob = await new Promise(res => enhancedCanvas.toBlob(res, 'image/png'));
+                const file = new File([blob], 'enhanced.png', { type: 'image/png' });
+                qrReader = new Html5Qrcode('scan-file', scanConfig());
+                const hit = await qrReader.scanFile(file, false);
+                if (hit && String(hit).trim().length >= 2) return String(hit).trim();
+            } catch (e) {
+            } finally {
+                try { if (qrReader) qrReader.clear(); } catch (e) {}
+            }
+            return null;
         },
 
         async runOcrPipeline(sourceCanvas, targetField) {
-            if (!window.Tesseract) return this.toast('Library OCR belum termuat', 'error');
+            if (!window.Tesseract) { this.ocrBusy = false; return this.toast('Library OCR belum termuat', 'error'); }
             this.ocrBusy = true;
             this.ocrProgressText = 'Mempertajam kontras...';
 
             try {
-                const processedCanvas = preprocessCanvasForOcr(sourceCanvas);
-                const dataUrl = processedCanvas.toDataURL('image/png');
+                await sleep(30);
+                const variants = buildOcrVariants(sourceCanvas);
 
-                let qrReader = null;
-                try {
-                    const blob = await new Promise(res => processedCanvas.toBlob(res, 'image/png'));
-                    const file = new File([blob], 'enhanced.png', { type: 'image/png' });
-                    qrReader = new Html5Qrcode('scan-file', scanConfig());
-                    const barcodeHit = await qrReader.scanFile(file, false);
-                    if (barcodeHit && String(barcodeHit).trim().length >= 2) {
-                        this.ocrBusy = false;
-                        this.handleScan(String(barcodeHit).trim());
-                        return;
-                    }
-                } catch (e) {
-                } finally {
-                    try { if (qrReader) qrReader.clear(); } catch (e) {}
+                this.ocrProgressText = 'Memeriksa barcode...';
+                const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
+                if (barcodeHit) {
+                    this.ocrBusy = false;
+                    this.handleScan(barcodeHit);
+                    return;
                 }
 
-                this.ocrProgressText = 'Membaca teks...';
+                this.ocrProgressText = 'Menyiapkan mesin OCR...';
                 const worker = await getOcrWorker((m) => {
                     if (m.status === 'recognizing text') {
-                        this.ocrProgressText = 'Membaca karakter: ' + Math.round((m.progress || 0) * 100) + '%';
+                        this.ocrProgressText = (this.ocrPassLabel || 'Membaca') + ' ' + Math.round((m.progress || 0) * 100) + '%';
+                    } else if (m.status && /load|init/i.test(m.status)) {
+                        this.ocrProgressText = 'Menyiapkan mesin OCR...';
                     }
                 });
-                const result = await worker.recognize(dataUrl);
-                const rawText = (result && result.data && result.data.text) ? result.data.text : '';
-                const candidates = extractLabelCandidates(rawText, targetField ? targetField.type : 'text');
+
+                const fieldType = targetField ? targetField.type : 'text';
+                const { candidates, rawText } = await recognizeBestCandidates(worker, variants, fieldType, (i, n) => {
+                    this.ocrPassLabel = 'Pembacaan ' + i + '/' + n + ':';
+                    this.ocrProgressText = this.ocrPassLabel + ' 0%';
+                });
+                this.ocrPassLabel = '';
 
                 this.ocrBusy = false;
                 if (!candidates.length && !rawText.trim()) {
-                    this.scanStatus = 'Teks tidak terbaca. Coba dekatkan lagi.';
+                    this.scanStatus = 'Teks tidak terbaca. Dekatkan, pastikan terang & fokus.';
                     this.toast('Teks tidak terbaca', 'error');
                     return;
                 }
@@ -1481,7 +1732,7 @@ function app() {
                     fieldLabel: targetField ? targetField.label : 'Hasil OCR',
                     candidates,
                     editedText: targetField && targetField.type === 'mac' ? this.formatMac(best) : best,
-                    previewUrl: dataUrl
+                    previewUrl: variants.gray.toDataURL('image/jpeg', 0.85)
                 };
             } catch (err) {
                 this.ocrBusy = false;
@@ -1512,6 +1763,7 @@ function app() {
         },
 
         async stopCamera() {
+            this.stopNativeLoop();
             const s = scannerInstance;
             scannerInstance = null;
             this.scanTorchOn = false;
@@ -1533,6 +1785,27 @@ function app() {
             this.scanStatus = 'Membaca kode dari foto...';
             await this.stopCamera();
 
+            let bmp = null;
+            try { bmp = await createImageBitmap(file); } catch (e) { bmp = null; }
+
+            // 1) BarcodeDetector native langsung pada foto asli
+            if (bmp) {
+                try {
+                    const det = await getNativeDetector();
+                    if (det) {
+                        const codes = await det.detect(bmp);
+                        if (codes && codes.length && String(codes[0].rawValue || '').trim().length >= 2) {
+                            playScanBeep();
+                            this.scanBusy = false;
+                            await this.handleScan(String(codes[0].rawValue).trim());
+                            if (this.scanOpen) await this.startCameraStream();
+                            return;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // 2) html5-qrcode pada file asli
             let reader;
             try {
                 reader = new Html5Qrcode('scan-file', scanConfig());
@@ -1547,23 +1820,23 @@ function app() {
                 try { if (reader) reader.clear(); } catch (e) {}
             }
 
+            // 3) OCR multi-pass pada foto
             try {
-                const bmp = await createImageBitmap(file);
-                const maxSide = 1600;
+                if (!bmp) bmp = await createImageBitmap(file);
+                const maxSide = 2600;
                 const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
-                const cvs = document.createElement('canvas');
-                cvs.width = Math.round(bmp.width * scale);
-                cvs.height = Math.round(bmp.height * scale);
+                const cvs = makeCanvas(bmp.width * scale, bmp.height * scale);
                 cvs.getContext('2d').drawImage(bmp, 0, 0, cvs.width, cvs.height);
                 await this.runOcrPipeline(cvs, q);
             } catch (err) {
+                this.ocrBusy = false;
                 this.scanStatus = 'Gagal memproses foto.';
             }
         },
 
         applyScanAndAdvance(raw, q) {
             let value = String(raw).trim();
-            if (q.type === 'mac') value = this.formatMac(value);
+            value = q.type === 'mac' ? this.formatMac(value) : this.normalizeTag(value);
             this.formData[q.id] = value;
             this.saveDraft();
 
@@ -1585,7 +1858,7 @@ function app() {
 
         applyScan(raw, q) {
             let value = String(raw).trim();
-            if (q.type === 'mac') value = this.formatMac(value);
+            value = q.type === 'mac' ? this.formatMac(value) : this.normalizeTag(value);
             this.formData[q.id] = value;
             this.saveDraft();
 
