@@ -161,7 +161,7 @@ function playScanBeep() {
 /* ===================== IMAGE ENHANCEMENT & OCR (v2) ===================== */
 const GUIDE = { w: 0.84, h: 0.50 };
 const NATIVE_FORMATS = ['code_128', 'code_39', 'code_93', 'qr_code', 'ean_13', 'ean_8', 'itf', 'codabar', 'upc_a', 'upc_e', 'data_matrix'];
-const OCR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-:. ';
+const OCR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-:. ';
 
 let nativeDetector;
 let nativeScanTimer = null;
