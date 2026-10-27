@@ -34,7 +34,7 @@
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
     <link rel="stylesheet" href="style.css?v=2.4.4" />
-    <script src="app.js?v=2.4.0"></script>
+    <script src="app.js?v=2.5.2"></script>
     <script src="motion-layer.js"></script>
     <script
       defer
@@ -219,8 +219,10 @@
             <span
               class="inline-flex items-center gap-1 text-[11px] font-extrabold uppercase tracking-wider text-amber-600"
             >
-              <i data-lucide="scan-text" class="w-3.5 h-3.5"></i> Hasil
-              Pembacaan Teks (OCR)
+              <i data-lucide="scan-text" class="w-3.5 h-3.5"></i>
+              <span
+                x-text="ocrMode === 'free' ? 'Hasil Pembacaan Teks Bebas (OCR)' : 'Hasil Pembacaan Teks (OCR)'"
+              ></span>
             </span>
             <h3
               class="font-extrabold text-base mt-0.5"
@@ -268,8 +270,8 @@
             type="text"
             class="inp mono font-bold"
             x-model="ocrChoiceModal.editedText"
-            placeholder="Ketik kode..."
-            autocapitalize="characters"
+            :placeholder="ocrMode === 'free' ? 'Ketik teks...' : 'Ketik kode...'"
+            :autocapitalize="ocrMode === 'free' ? 'none' : 'characters'"
             autocomplete="off"
             spellcheck="false"
             @keydown.enter.prevent="confirmOcrText()"
@@ -648,6 +650,35 @@
       </div>
 
       <div class="p-4 space-y-2 max-w-md mx-auto w-full">
+        <!-- PILIH MODE OCR (hanya saat mengisi kolom) -->
+        <div
+          x-show="scanTarget"
+          x-cloak
+          class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-800 border border-slate-700"
+          role="group"
+          aria-label="Mode pembacaan teks"
+        >
+          <button
+            type="button"
+            @click="ocrMode = 'tag'"
+            :disabled="ocrBusy"
+            :aria-pressed="ocrMode === 'tag'"
+            class="py-2 rounded-lg text-[11px] font-extrabold transition"
+            :class="ocrMode === 'tag' ? 'bg-amber-400 text-slate-900' : 'text-slate-300'"
+          >
+            Mode Tag
+          </button>
+          <button
+            type="button"
+            @click="ocrMode = 'free'"
+            :disabled="ocrBusy"
+            :aria-pressed="ocrMode === 'free'"
+            class="py-2 rounded-lg text-[11px] font-extrabold transition"
+            :class="ocrMode === 'free' ? 'bg-amber-400 text-slate-900' : 'text-slate-300'"
+          >
+            Teks bebas
+          </button>
+        </div>
         <button
           @click="captureOcrFromLiveVideo()"
           :disabled="ocrBusy"
@@ -659,7 +690,7 @@
         >
           <i data-lucide="scan-text" class="w-4 h-4"></i>
           <span
-            x-text="ocrBusy ? 'Sedang membaca teks...' : 'Baca teks pada label'"
+            x-text="ocrBusy ? 'Sedang membaca teks...' : (ocrMode === 'free' ? 'Baca teks bebas' : 'Baca teks pada label')"
           ></span>
         </button>
         <div class="grid grid-cols-2 gap-2">
