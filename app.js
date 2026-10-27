@@ -22,7 +22,7 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.5.3';
+    const APP_VERSION = '2.5.1';
     try {
         if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
     } catch (e) {}
@@ -274,31 +274,8 @@ function grayToCanvas(gray, w, h, pad = 24) {
     return out;
 }
 
-/* Blur kotak ringan (integral image) untuk meredam pola moire / tekstur latar. */
-function boxBlurGray(gray, w, h, r) {
-    const integral = new Float64Array((w + 1) * (h + 1));
-    for (let y = 1; y <= h; y++) {
-        let rowSum = 0;
-        for (let x = 1; x <= w; x++) {
-            rowSum += gray[(y - 1) * w + (x - 1)];
-            integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
-        }
-    }
-    const out = new Uint8ClampedArray(w * h);
-    for (let y = 0; y < h; y++) {
-        const y1 = Math.max(0, y - r), y2 = Math.min(h - 1, y + r);
-        for (let x = 0; x < w; x++) {
-            const x1 = Math.max(0, x - r), x2 = Math.min(w - 1, x + r);
-            const area = (x2 - x1 + 1) * (y2 - y1 + 1);
-            const sum = integral[(y2 + 1) * (w + 1) + (x2 + 1)] - integral[y1 * (w + 1) + (x2 + 1)] - integral[(y2 + 1) * (w + 1) + x1] + integral[y1 * (w + 1) + x1];
-            out[y * w + x] = sum / area;
-        }
-    }
-    return out;
-}
-
 /* Membuat varian gambar untuk OCR. fastOnly = hanya 'gray' + 'adaptive' pada ukuran kecil (jauh lebih ringan). */
-function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false, denoise = false) {
+function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false) {
     const base = scaleToWidth(sourceCanvas, targetWidth);
     const w = base.width, h = base.height;
     const d = base.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
@@ -311,7 +288,6 @@ function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false, de
     if (sum / gray.length < 100) {
         for (let i = 0; i < gray.length; i++) gray[i] = 255 - gray[i];
     }
-    if (denoise) gray = boxBlurGray(gray, w, h, 2);
     gray = stretchGray(gray);
     const winA = (Math.max(21, Math.round(w / 14)) | 1);
     const out = {
@@ -481,42 +457,6 @@ async function recognizeBestCandidates(worker, variants, fieldType, onPass, mode
         .map(e => e.c)
         .slice(0, 6);
     return { candidates: ranked, rawText: rawTexts.join('\n'), confident: isConfident(topEntry()) };
-}
-
-/* Mode TEKS BEBAS: tanpa whitelist, huruf kecil/besar & tanda baca dipertahankan. */
-function cleanFreeLines(text) {
-    return String(text || '').split(/\r?\n/)
-        .map(l => l.replace(/[^\S\n]+/g, ' ').trim())
-        .filter(l => {
-            if (l.length < 2) return false;
-            const alnum = (l.match(/[A-Za-z0-9]/g) || []).length;
-            return alnum / l.length >= 0.5;
-        });
-}
-
-async function recognizeFreeText(worker, variants, onPass) {
-    const order = ['gray', 'adaptive'];
-    let best = { text: '', conf: -1, lines: [] };
-    for (let i = 0; i < order.length; i++) {
-        if (onPass) onPass(i + 1, order.length);
-        try {
-            await worker.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' });
-        } catch (e) {}
-        const res = await worker.recognize(variants[order[i]].toDataURL('image/png'));
-        const text = (res && res.data && res.data.text) ? res.data.text : '';
-        const conf = (res && res.data && res.data.confidence) ? res.data.confidence : 0;
-        const rawLines = (res && res.data && Array.isArray(res.data.lines) && res.data.lines.length)
-            ? res.data.lines.filter(l => (l.confidence || 0) >= 60).map(l => l.text).join('\n')
-            : text;
-        const lines = cleanFreeLines(rawLines);
-        if (lines.length && conf > best.conf) best = { text, conf, lines };
-        if (best.conf >= 75) break;
-    }
-    const joined = best.lines.join(' ');
-    const candidates = [];
-    if (joined) candidates.push(joined);
-    best.lines.forEach(l => { if (!candidates.includes(l)) candidates.push(l); });
-    return { candidates: candidates.slice(0, 8), rawText: best.text, confident: best.lines.length > 0 && best.conf >= 75, conf: best.conf };
 }
 
 /* CONFIG & DATA DEFAULTS */
@@ -793,7 +733,6 @@ function app() {
         scanCameras: [], scanCamIdx: 0,
 
         ocrBusy: false,
-        ocrMode: 'tag',
         ocrProgressText: '',
         ocrChoiceModal: { open: false, field: null, fieldLabel: '', candidates: [], editedText: '', previewUrl: '' },
 
@@ -1518,7 +1457,6 @@ function app() {
             this.scanBusy = false;
             this.ocrBusy = false;
             this.scanOpen = true;
-            this.ocrMode = 'tag';
             this.scanHasTorch = false;
             this.scanTorchOn = false;
             this.scanZoomMax = 1;
@@ -1774,30 +1712,22 @@ function app() {
             return null;
         },
 
-        toggleOcrMode() {
-            this.ocrMode = this.ocrMode === 'free' ? 'tag' : 'free';
-            this.toast('Mode OCR: ' + (this.ocrMode === 'free' ? 'Teks bebas' : 'Tag'));
-        },
-
-        /* OCR: mode Tag = cepat dulu lalu mendalam; mode Teks bebas = baca apa adanya. */
+        /* OCR: jalur CEPAT dulu (gambar kecil, 2 pass), baru MENDALAM bila belum yakin. */
         async runOcrPipeline(sourceCanvas, targetField) {
             if (!window.Tesseract) { this.ocrBusy = false; return this.toast('Library OCR belum termuat', 'error'); }
             this.ocrBusy = true;
             this.ocrProgressText = 'Membaca...';
-            const freeMode = this.ocrMode === 'free';
 
             try {
                 await sleep(30);
-                let variants = buildOcrVariants(sourceCanvas, freeMode ? 900 : 1000, true, freeMode);
+                let variants = buildOcrVariants(sourceCanvas, 1000, true);
 
-                if (!freeMode) {
-                    this.ocrProgressText = 'Memeriksa barcode...';
-                    const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
-                    if (barcodeHit) {
-                        this.ocrBusy = false;
-                        this.handleScan(barcodeHit);
-                        return;
-                    }
+                this.ocrProgressText = 'Memeriksa barcode...';
+                const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
+                if (barcodeHit) {
+                    this.ocrBusy = false;
+                    this.handleScan(barcodeHit);
+                    return;
                 }
 
                 this.ocrProgressText = 'Menyiapkan mesin OCR...';
@@ -1815,67 +1745,20 @@ function app() {
                     this.ocrProgressText = this.ocrPassLabel + ' 0%';
                 };
 
-                let candidates, rawText;
+                let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
 
-                if (freeMode) {
-                    const free = await recognizeFreeText(worker, variants, onPass('Teks'));
-                    candidates = free.candidates;
-                    rawText = free.rawText;
-
-                    /* Pola tag (ada garis miring) di teks mentah -> jadikan pilihan teratas */
-                    const slashTags = extractLabelCandidates(free.rawText, 'text').filter(c => c.includes('/'));
-                    if (slashTags.length) candidates = [...slashTags, ...candidates];
-
-                    /* Hasil kurang yakin / berantakan -> cadangan: pembacaan khusus tag */
-                    if (!free.confident) {
-                        this.ocrProgressText = 'Memeriksa pola tag...';
-                        const tagVariants = buildOcrVariants(sourceCanvas, 1000, true);
-                        const tag = await recognizeBestCandidates(worker, tagVariants, 'text', onPass('Tag'), 'fast');
-                        const strong = tag.candidates.filter(c => scoreCandidate(c, 'text') >= 5);
-                        candidates = [...strong, ...candidates, ...tag.candidates];
-                        rawText = (rawText + '\n' + tag.rawText).trim();
-                    }
-                    const seenFree = new Set();
-                    candidates = candidates.filter(c => {
-                        const k = String(c).toUpperCase();
-                        if (seenFree.has(k)) return false;
-                        seenFree.add(k);
-                        return true;
-                    }).slice(0, 8);
-                } else {
-                    let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
-
-                    /* Belum yakin -> pembacaan mendalam (lebih lama) */
-                    if (!result.confident) {
-                        this.ocrProgressText = 'Pembacaan mendalam...';
-                        await sleep(30);
-                        variants = buildOcrVariants(sourceCanvas);
-                        result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Mendalam'), 'deep');
-                    }
-                    candidates = result.candidates;
-                    rawText = result.rawText;
-
-                    /* Detail tambahan: tag berupa nama/huruf saja (atau pola belum kuat) -> tambah hasil teks bebas
-                       supaya huruf kecil, spasi, dan nama lengkap (mis. "Logitech M185") ikut muncul sebagai pilihan. */
-                    if (fieldType !== 'mac' && (!candidates.length || scoreCandidate(candidates[0], fieldType) < 5)) {
-                        this.ocrProgressText = 'Memperdetail teks...';
-                        const free = await recognizeFreeText(worker, variants, onPass('Detail'));
-                        const hasSlash = candidates.some(c => c.includes('/'));
-                        const merged = hasSlash ? [...candidates, ...free.candidates] : [...free.candidates, ...candidates];
-                        const seen = new Set();
-                        candidates = merged.filter(c => {
-                            const k = String(c).toUpperCase();
-                            if (seen.has(k)) return false;
-                            seen.add(k);
-                            return true;
-                        }).slice(0, 8);
-                        rawText = (rawText + '\n' + free.rawText).trim();
-                    }
+                /* Belum yakin -> pembacaan mendalam (lebih lama) */
+                if (!result.confident) {
+                    this.ocrProgressText = 'Pembacaan mendalam...';
+                    await sleep(30);
+                    variants = buildOcrVariants(sourceCanvas);
+                    result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Mendalam'), 'deep');
                 }
                 this.ocrPassLabel = '';
 
+                const { candidates, rawText } = result;
                 this.ocrBusy = false;
-                if (!candidates.length && !String(rawText || '').trim()) {
+                if (!candidates.length && !rawText.trim()) {
                     this.scanStatus = 'Teks tidak terbaca. Dekatkan, pastikan terang & fokus.';
                     this.toast('Teks tidak terbaca', 'error');
                     return;
@@ -1883,7 +1766,7 @@ function app() {
 
                 playScanBeep();
                 await this.closeScanner();
-                const best = candidates[0] || String(rawText || '').trim().split(/\s+/)[0] || '';
+                const best = candidates[0] || rawText.trim().split(/\s+/)[0] || '';
                 this.ocrChoiceModal = {
                     open: true,
                     field: targetField,
