@@ -22,7 +22,7 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.5.2';
+    const APP_VERSION = '2.5.3';
     try {
         if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
     } catch (e) {}
@@ -274,8 +274,31 @@ function grayToCanvas(gray, w, h, pad = 24) {
     return out;
 }
 
+/* Blur kotak ringan (integral image) untuk meredam pola moire / tekstur latar. */
+function boxBlurGray(gray, w, h, r) {
+    const integral = new Float64Array((w + 1) * (h + 1));
+    for (let y = 1; y <= h; y++) {
+        let rowSum = 0;
+        for (let x = 1; x <= w; x++) {
+            rowSum += gray[(y - 1) * w + (x - 1)];
+            integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+        }
+    }
+    const out = new Uint8ClampedArray(w * h);
+    for (let y = 0; y < h; y++) {
+        const y1 = Math.max(0, y - r), y2 = Math.min(h - 1, y + r);
+        for (let x = 0; x < w; x++) {
+            const x1 = Math.max(0, x - r), x2 = Math.min(w - 1, x + r);
+            const area = (x2 - x1 + 1) * (y2 - y1 + 1);
+            const sum = integral[(y2 + 1) * (w + 1) + (x2 + 1)] - integral[y1 * (w + 1) + (x2 + 1)] - integral[(y2 + 1) * (w + 1) + x1] + integral[y1 * (w + 1) + x1];
+            out[y * w + x] = sum / area;
+        }
+    }
+    return out;
+}
+
 /* Membuat varian gambar untuk OCR. fastOnly = hanya 'gray' + 'adaptive' pada ukuran kecil (jauh lebih ringan). */
-function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false) {
+function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false, denoise = false) {
     const base = scaleToWidth(sourceCanvas, targetWidth);
     const w = base.width, h = base.height;
     const d = base.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
@@ -288,6 +311,7 @@ function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false) {
     if (sum / gray.length < 100) {
         for (let i = 0; i < gray.length; i++) gray[i] = 255 - gray[i];
     }
+    if (denoise) gray = boxBlurGray(gray, w, h, 2);
     gray = stretchGray(gray);
     const winA = (Math.max(21, Math.round(w / 14)) | 1);
     const out = {
@@ -481,7 +505,10 @@ async function recognizeFreeText(worker, variants, onPass) {
         const res = await worker.recognize(variants[order[i]].toDataURL('image/png'));
         const text = (res && res.data && res.data.text) ? res.data.text : '';
         const conf = (res && res.data && res.data.confidence) ? res.data.confidence : 0;
-        const lines = cleanFreeLines(text);
+        const rawLines = (res && res.data && Array.isArray(res.data.lines) && res.data.lines.length)
+            ? res.data.lines.filter(l => (l.confidence || 0) >= 60).map(l => l.text).join('\n')
+            : text;
+        const lines = cleanFreeLines(rawLines);
         if (lines.length && conf > best.conf) best = { text, conf, lines };
         if (best.conf >= 75) break;
     }
@@ -489,7 +516,7 @@ async function recognizeFreeText(worker, variants, onPass) {
     const candidates = [];
     if (joined) candidates.push(joined);
     best.lines.forEach(l => { if (!candidates.includes(l)) candidates.push(l); });
-    return { candidates: candidates.slice(0, 8), rawText: best.text, confident: best.conf >= 75, conf: best.conf };
+    return { candidates: candidates.slice(0, 8), rawText: best.text, confident: best.lines.length > 0 && best.conf >= 75, conf: best.conf };
 }
 
 /* CONFIG & DATA DEFAULTS */
@@ -1761,7 +1788,7 @@ function app() {
 
             try {
                 await sleep(30);
-                let variants = buildOcrVariants(sourceCanvas, freeMode ? 1400 : 1000, true);
+                let variants = buildOcrVariants(sourceCanvas, freeMode ? 900 : 1000, true, freeMode);
 
                 if (!freeMode) {
                     this.ocrProgressText = 'Memeriksa barcode...';
@@ -1794,6 +1821,27 @@ function app() {
                     const free = await recognizeFreeText(worker, variants, onPass('Teks'));
                     candidates = free.candidates;
                     rawText = free.rawText;
+
+                    /* Pola tag (ada garis miring) di teks mentah -> jadikan pilihan teratas */
+                    const slashTags = extractLabelCandidates(free.rawText, 'text').filter(c => c.includes('/'));
+                    if (slashTags.length) candidates = [...slashTags, ...candidates];
+
+                    /* Hasil kurang yakin / berantakan -> cadangan: pembacaan khusus tag */
+                    if (!free.confident) {
+                        this.ocrProgressText = 'Memeriksa pola tag...';
+                        const tagVariants = buildOcrVariants(sourceCanvas, 1000, true);
+                        const tag = await recognizeBestCandidates(worker, tagVariants, 'text', onPass('Tag'), 'fast');
+                        const strong = tag.candidates.filter(c => scoreCandidate(c, 'text') >= 5);
+                        candidates = [...strong, ...candidates, ...tag.candidates];
+                        rawText = (rawText + '\n' + tag.rawText).trim();
+                    }
+                    const seenFree = new Set();
+                    candidates = candidates.filter(c => {
+                        const k = String(c).toUpperCase();
+                        if (seenFree.has(k)) return false;
+                        seenFree.add(k);
+                        return true;
+                    }).slice(0, 8);
                 } else {
                     let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
 
