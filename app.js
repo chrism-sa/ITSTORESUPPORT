@@ -22,7 +22,7 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.5.1';
+    const APP_VERSION = '2.5.2';
     try {
         if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
     } catch (e) {}
@@ -459,6 +459,39 @@ async function recognizeBestCandidates(worker, variants, fieldType, onPass, mode
     return { candidates: ranked, rawText: rawTexts.join('\n'), confident: isConfident(topEntry()) };
 }
 
+/* Mode TEKS BEBAS: tanpa whitelist, huruf kecil/besar & tanda baca dipertahankan. */
+function cleanFreeLines(text) {
+    return String(text || '').split(/\r?\n/)
+        .map(l => l.replace(/[^\S\n]+/g, ' ').trim())
+        .filter(l => {
+            if (l.length < 2) return false;
+            const alnum = (l.match(/[A-Za-z0-9]/g) || []).length;
+            return alnum / l.length >= 0.5;
+        });
+}
+
+async function recognizeFreeText(worker, variants, onPass) {
+    const order = ['gray', 'adaptive'];
+    let best = { text: '', conf: -1, lines: [] };
+    for (let i = 0; i < order.length; i++) {
+        if (onPass) onPass(i + 1, order.length);
+        try {
+            await worker.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' });
+        } catch (e) {}
+        const res = await worker.recognize(variants[order[i]].toDataURL('image/png'));
+        const text = (res && res.data && res.data.text) ? res.data.text : '';
+        const conf = (res && res.data && res.data.confidence) ? res.data.confidence : 0;
+        const lines = cleanFreeLines(text);
+        if (lines.length && conf > best.conf) best = { text, conf, lines };
+        if (best.conf >= 75) break;
+    }
+    const joined = best.lines.join(' ');
+    const candidates = [];
+    if (joined) candidates.push(joined);
+    best.lines.forEach(l => { if (!candidates.includes(l)) candidates.push(l); });
+    return { candidates: candidates.slice(0, 8), rawText: best.text, confident: best.conf >= 75, conf: best.conf };
+}
+
 /* CONFIG & DATA DEFAULTS */
 const REGION_COLORS = {
     blitar: '#dc2626',
@@ -733,6 +766,7 @@ function app() {
         scanCameras: [], scanCamIdx: 0,
 
         ocrBusy: false,
+        ocrMode: 'tag',
         ocrProgressText: '',
         ocrChoiceModal: { open: false, field: null, fieldLabel: '', candidates: [], editedText: '', previewUrl: '' },
 
@@ -1457,6 +1491,7 @@ function app() {
             this.scanBusy = false;
             this.ocrBusy = false;
             this.scanOpen = true;
+            this.ocrMode = 'tag';
             this.scanHasTorch = false;
             this.scanTorchOn = false;
             this.scanZoomMax = 1;
@@ -1712,22 +1747,30 @@ function app() {
             return null;
         },
 
-        /* OCR: jalur CEPAT dulu (gambar kecil, 2 pass), baru MENDALAM bila belum yakin. */
+        toggleOcrMode() {
+            this.ocrMode = this.ocrMode === 'free' ? 'tag' : 'free';
+            this.toast('Mode OCR: ' + (this.ocrMode === 'free' ? 'Teks bebas' : 'Tag'));
+        },
+
+        /* OCR: mode Tag = cepat dulu lalu mendalam; mode Teks bebas = baca apa adanya. */
         async runOcrPipeline(sourceCanvas, targetField) {
             if (!window.Tesseract) { this.ocrBusy = false; return this.toast('Library OCR belum termuat', 'error'); }
             this.ocrBusy = true;
             this.ocrProgressText = 'Membaca...';
+            const freeMode = this.ocrMode === 'free';
 
             try {
                 await sleep(30);
-                let variants = buildOcrVariants(sourceCanvas, 1000, true);
+                let variants = buildOcrVariants(sourceCanvas, freeMode ? 1400 : 1000, true);
 
-                this.ocrProgressText = 'Memeriksa barcode...';
-                const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
-                if (barcodeHit) {
-                    this.ocrBusy = false;
-                    this.handleScan(barcodeHit);
-                    return;
+                if (!freeMode) {
+                    this.ocrProgressText = 'Memeriksa barcode...';
+                    const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
+                    if (barcodeHit) {
+                        this.ocrBusy = false;
+                        this.handleScan(barcodeHit);
+                        return;
+                    }
                 }
 
                 this.ocrProgressText = 'Menyiapkan mesin OCR...';
@@ -1745,20 +1788,46 @@ function app() {
                     this.ocrProgressText = this.ocrPassLabel + ' 0%';
                 };
 
-                let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
+                let candidates, rawText;
 
-                /* Belum yakin -> pembacaan mendalam (lebih lama) */
-                if (!result.confident) {
-                    this.ocrProgressText = 'Pembacaan mendalam...';
-                    await sleep(30);
-                    variants = buildOcrVariants(sourceCanvas);
-                    result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Mendalam'), 'deep');
+                if (freeMode) {
+                    const free = await recognizeFreeText(worker, variants, onPass('Teks'));
+                    candidates = free.candidates;
+                    rawText = free.rawText;
+                } else {
+                    let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
+
+                    /* Belum yakin -> pembacaan mendalam (lebih lama) */
+                    if (!result.confident) {
+                        this.ocrProgressText = 'Pembacaan mendalam...';
+                        await sleep(30);
+                        variants = buildOcrVariants(sourceCanvas);
+                        result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Mendalam'), 'deep');
+                    }
+                    candidates = result.candidates;
+                    rawText = result.rawText;
+
+                    /* Detail tambahan: tag berupa nama/huruf saja (atau pola belum kuat) -> tambah hasil teks bebas
+                       supaya huruf kecil, spasi, dan nama lengkap (mis. "Logitech M185") ikut muncul sebagai pilihan. */
+                    if (fieldType !== 'mac' && (!candidates.length || scoreCandidate(candidates[0], fieldType) < 5)) {
+                        this.ocrProgressText = 'Memperdetail teks...';
+                        const free = await recognizeFreeText(worker, variants, onPass('Detail'));
+                        const hasSlash = candidates.some(c => c.includes('/'));
+                        const merged = hasSlash ? [...candidates, ...free.candidates] : [...free.candidates, ...candidates];
+                        const seen = new Set();
+                        candidates = merged.filter(c => {
+                            const k = String(c).toUpperCase();
+                            if (seen.has(k)) return false;
+                            seen.add(k);
+                            return true;
+                        }).slice(0, 8);
+                        rawText = (rawText + '\n' + free.rawText).trim();
+                    }
                 }
                 this.ocrPassLabel = '';
 
-                const { candidates, rawText } = result;
                 this.ocrBusy = false;
-                if (!candidates.length && !rawText.trim()) {
+                if (!candidates.length && !String(rawText || '').trim()) {
                     this.scanStatus = 'Teks tidak terbaca. Dekatkan, pastikan terang & fokus.';
                     this.toast('Teks tidak terbaca', 'error');
                     return;
@@ -1766,7 +1835,7 @@ function app() {
 
                 playScanBeep();
                 await this.closeScanner();
-                const best = candidates[0] || rawText.trim().split(/\s+/)[0] || '';
+                const best = candidates[0] || String(rawText || '').trim().split(/\s+/)[0] || '';
                 this.ocrChoiceModal = {
                     open: true,
                     field: targetField,
