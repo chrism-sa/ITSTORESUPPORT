@@ -22,7 +22,7 @@
 })();
 
 (function checkAppVersion() {
-    const APP_VERSION = '2.5.0';
+    const APP_VERSION = '2.5.1';
     try {
         if (localStorage.getItem('aft2:version') !== APP_VERSION) localStorage.setItem('aft2:version', APP_VERSION);
     } catch (e) {}
@@ -158,7 +158,7 @@ function playScanBeep() {
     } catch (e) {}
 }
 
-/* ===================== IMAGE ENHANCEMENT & OCR (v2) ===================== */
+/* ===================== IMAGE ENHANCEMENT & OCR (v2.1 cepat) ===================== */
 const GUIDE = { w: 0.84, h: 0.50 };
 const NATIVE_FORMATS = ['code_128', 'code_39', 'code_93', 'qr_code', 'ean_13', 'ean_8', 'itf', 'codabar', 'upc_a', 'upc_e', 'data_matrix'];
 const OCR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-:. ';
@@ -274,9 +274,9 @@ function grayToCanvas(gray, w, h, pad = 24) {
     return out;
 }
 
-/* Membuat beberapa varian gambar untuk OCR multi-pass. */
-function buildOcrVariants(sourceCanvas) {
-    const base = scaleToWidth(sourceCanvas, 1800);
+/* Membuat varian gambar untuk OCR. fastOnly = hanya 'gray' + 'adaptive' pada ukuran kecil (jauh lebih ringan). */
+function buildOcrVariants(sourceCanvas, targetWidth = 1800, fastOnly = false) {
+    const base = scaleToWidth(sourceCanvas, targetWidth);
     const w = base.width, h = base.height;
     const d = base.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
     let gray = new Uint8ClampedArray(w * h);
@@ -290,12 +290,15 @@ function buildOcrVariants(sourceCanvas) {
     }
     gray = stretchGray(gray);
     const winA = (Math.max(21, Math.round(w / 14)) | 1);
-    const winB = (Math.max(15, Math.round(w / 30)) | 1);
-    return {
+    const out = {
         gray: grayToCanvas(gray, w, h),
-        adaptive: grayToCanvas(adaptiveBinarize(gray, w, h, winA, 8), w, h),
-        fine: grayToCanvas(adaptiveBinarize(gray, w, h, winB, 12), w, h)
+        adaptive: grayToCanvas(adaptiveBinarize(gray, w, h, winA, 8), w, h)
     };
+    if (!fastOnly) {
+        const winB = (Math.max(15, Math.round(w / 30)) | 1);
+        out.fine = grayToCanvas(adaptiveBinarize(gray, w, h, winB, 12), w, h);
+    }
+    return out;
 }
 
 function extractLabelCandidates(rawText, fieldType) {
@@ -353,6 +356,15 @@ function extractLabelCandidates(rawText, fieldType) {
                 if (cl.length >= 5 && /[0-9]/.test(cl)) pushUnique(cl);
             });
         });
+
+        /* Tag hanya huruf / nama (mis. "NO TAGGING", "LOGITECH", "TIDAK ADA") */
+        if (!candidates.length) {
+            lines.forEach(line => {
+                const cl = line.replace(/[^A-Z \-]/g, '').replace(/\s+/g, ' ').trim();
+                if (cl.length < 3) return;
+                pushUnique(cl === 'NO TAGGING' ? 'No Tagging' : cl);
+            });
+        }
     }
 
     return candidates.slice(0, 8);
@@ -371,7 +383,9 @@ function scoreCandidate(c, fieldType) {
     if (parts.length >= 3 && /^\d{3,5}$/.test(parts[parts.length - 2])) s += 1.5;
     if (/^S[A-Z0-9]{1,5}$/.test(parts[0] || '')) s += 1;
     if (c.length >= 6 && c.length <= 26) s += 1; else s -= 1;
-    if (/[^A-Z0-9/-]/.test(c)) s -= 2;
+    if (/[^A-Za-z0-9/\- ]/.test(c)) s -= 2;
+    /* Nama huruf saja diberi skor kecil tapi positif */
+    if (parts.length < 2 && /^[A-Za-z][A-Za-z \-]{2,}$/.test(c)) s += 1.5;
     return s;
 }
 
@@ -390,16 +404,29 @@ function getOcrWorker(logger) {
     return ocrWorkerLoading;
 }
 
-/* OCR multi-pass: beberapa varian gambar + mode segmentasi, hasilnya divoting dan diberi skor. */
-async function recognizeBestCandidates(worker, variants, fieldType, onPass) {
-    const passes = [
-        { v: 'gray', psm: '6', wl: true },
-        { v: 'adaptive', psm: '6', wl: true },
-        { v: 'adaptive', psm: '11', wl: false },
-        { v: 'fine', psm: '6', wl: false }
-    ];
+/* OCR multi-pass. mode 'fast' = 2 pass ringan & berhenti begitu yakin. mode 'deep' = 4 pass. */
+async function recognizeBestCandidates(worker, variants, fieldType, onPass, mode = 'deep') {
+    const passes = mode === 'fast'
+        ? [
+            { v: 'gray', psm: '6', wl: true },
+            { v: 'adaptive', psm: '6', wl: true }
+        ]
+        : [
+            { v: 'gray', psm: '6', wl: true },
+            { v: 'adaptive', psm: '6', wl: true },
+            { v: 'adaptive', psm: '11', wl: false },
+            { v: 'fine', psm: '6', wl: false }
+        ];
     const votes = new Map();
     const rawTexts = [];
+
+    const topEntry = () => Array.from(votes.values())
+        .sort((a, b) => (b.base + b.count * 2) - (a.base + a.count * 2))[0];
+    const isConfident = (top) => {
+        if (!top) return false;
+        if (mode === 'fast') return top.base >= 5 || (top.count >= 2 && top.base >= 1);
+        return top.base >= 6.5 && top.count >= 2;
+    };
 
     for (let i = 0; i < passes.length; i++) {
         const p = passes[i];
@@ -422,15 +449,14 @@ async function recognizeBestCandidates(worker, variants, fieldType, onPass) {
             votes.set(c, e);
         });
 
-        const top = Array.from(votes.values()).sort((a, b) => (b.base + b.count * 2) - (a.base + a.count * 2))[0];
-        if (top && top.base >= 6.5 && top.count >= 2) break;
+        if (isConfident(topEntry())) break;
     }
 
     const ranked = Array.from(votes.values())
         .sort((a, b) => (b.base + b.count * 2 + b.conf / 50) - (a.base + a.count * 2 + a.conf / 50))
         .map(e => e.c)
         .slice(0, 6);
-    return { candidates: ranked, rawText: rawTexts.join('\n') };
+    return { candidates: ranked, rawText: rawTexts.join('\n'), confident: isConfident(topEntry()) };
 }
 
 /* CONFIG & DATA DEFAULTS */
@@ -1424,7 +1450,7 @@ function app() {
             }
         },
 
-        /* ===================== SCANNER (v2) ===================== */
+        /* ===================== SCANNER (v2.1 cepat) ===================== */
         async openScanner(q) {
             if (!window.Html5Qrcode) return this.toast('Library scanner belum termuat. Cek koneksi.', 'error');
             this.scanTarget = q;
@@ -1436,6 +1462,9 @@ function app() {
             this.scanZoomMax = 1;
             lastScanBuffer = { text: '', count: 0, time: 0 };
             this.requestWakeLock();
+
+            /* Muat mesin OCR di latar belakang supaya OCR pertama tidak menunggu */
+            if (window.Tesseract) getOcrWorker(null).catch(() => {});
 
             if (!window.isSecureContext) {
                 this.scanStatus = 'Kamera langsung memerlukan HTTPS. Gunakan opsi pindai dari foto.';
@@ -1642,13 +1671,13 @@ function app() {
             this.ocrProgressText = 'Mengambil gambar tertajam...';
             try {
                 let bestCanvas = null, bestScore = -1;
-                for (let i = 0; i < 5; i++) {
+                for (let i = 0; i < 3; i++) {
                     const r = this.getGuideCropRect(videoEl);
                     const c = makeCanvas(r.w, r.h);
                     c.getContext('2d').drawImage(videoEl, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
                     const sc = canvasSharpness(c);
                     if (sc > bestScore) { bestScore = sc; bestCanvas = c; }
-                    await sleep(110);
+                    await sleep(70);
                 }
                 await this.runOcrPipeline(bestCanvas, this.scanTarget);
             } catch (e) {
@@ -1683,14 +1712,15 @@ function app() {
             return null;
         },
 
+        /* OCR: jalur CEPAT dulu (gambar kecil, 2 pass), baru MENDALAM bila belum yakin. */
         async runOcrPipeline(sourceCanvas, targetField) {
             if (!window.Tesseract) { this.ocrBusy = false; return this.toast('Library OCR belum termuat', 'error'); }
             this.ocrBusy = true;
-            this.ocrProgressText = 'Mempertajam kontras...';
+            this.ocrProgressText = 'Membaca...';
 
             try {
                 await sleep(30);
-                const variants = buildOcrVariants(sourceCanvas);
+                let variants = buildOcrVariants(sourceCanvas, 1000, true);
 
                 this.ocrProgressText = 'Memeriksa barcode...';
                 const barcodeHit = await this.tryDecodeBarcode(sourceCanvas, variants.gray);
@@ -1710,12 +1740,23 @@ function app() {
                 });
 
                 const fieldType = targetField ? targetField.type : 'text';
-                const { candidates, rawText } = await recognizeBestCandidates(worker, variants, fieldType, (i, n) => {
-                    this.ocrPassLabel = 'Pembacaan ' + i + '/' + n + ':';
+                const onPass = (label) => (i, n) => {
+                    this.ocrPassLabel = label + ' ' + i + '/' + n + ':';
                     this.ocrProgressText = this.ocrPassLabel + ' 0%';
-                });
+                };
+
+                let result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Cepat'), 'fast');
+
+                /* Belum yakin -> pembacaan mendalam (lebih lama) */
+                if (!result.confident) {
+                    this.ocrProgressText = 'Pembacaan mendalam...';
+                    await sleep(30);
+                    variants = buildOcrVariants(sourceCanvas);
+                    result = await recognizeBestCandidates(worker, variants, fieldType, onPass('Mendalam'), 'deep');
+                }
                 this.ocrPassLabel = '';
 
+                const { candidates, rawText } = result;
                 this.ocrBusy = false;
                 if (!candidates.length && !rawText.trim()) {
                     this.scanStatus = 'Teks tidak terbaca. Dekatkan, pastikan terang & fokus.';
@@ -1820,7 +1861,7 @@ function app() {
                 try { if (reader) reader.clear(); } catch (e) {}
             }
 
-            // 3) OCR multi-pass pada foto
+            // 3) OCR (cepat dulu, lalu mendalam) pada foto
             try {
                 if (!bmp) bmp = await createImageBitmap(file);
                 const maxSide = 2600;
